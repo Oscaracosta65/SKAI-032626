@@ -5374,6 +5374,20 @@ function mylottoexpertExtractDailySavedView($row)
         'top_extras'            => array()
     );
 
+    // [[SKAI_DISPLAY_SYNC]] Early detection: trust structured schema columns written by the
+    // primary save handler. prediction_family='daily' and renderer_hint='daily_combos' are
+    // set for every Pick3/4/5 row saved after the schema upgrade; detecting them here lets
+    // the extractor skip all the JSON-key hunting for those rows and return early once
+    // combo_strings is populated below.
+    if (is_object($row)) {
+        $__pf = isset($row->prediction_family) ? (string)$row->prediction_family : '';
+        $__rh = isset($row->renderer_hint)     ? (string)$row->renderer_hint     : '';
+        $__rm = isset($row->render_mode)       ? (string)$row->render_mode       : '';
+        if ($__pf === 'daily' || $__rh === 'daily_combos' || $__rm === 'daily_combos') {
+            $result['is_daily'] = true;
+        }
+    }
+
     // --- Prefer new structured columns when available ---
     $dailyPickSize = 0;
     if (is_object($row) && isset($row->daily_pick_size) && (int)$row->daily_pick_size > 0) {
@@ -5527,7 +5541,19 @@ function mylottoexpertExtractDailySavedView($row)
         }
 
         // [[SKAI_DISPLAY_SYNC]] Fallback: read aiPredictedNumbers (display strings in FPS JSON)
-        if (empty($result['combo_strings']) && !empty($decoded['aiPredictedNumbers']) && is_array($decoded['aiPredictedNumbers'])) {
+        // GUARD: Only treat aiPredictedNumbers as daily combo strings when the FPS JSON
+        // predictionMode is explicitly 'daily_digit' OR is absent (legacy pre-predictionMode
+        // rows saved before this field was added — those are assumed daily when aiPredictedNumbers
+        // is present, since regular-lottery FPS JSON did not contain aiPredictedNumbers then).
+        // Regular-lottery rows (EuroMillions, Powerball) with predictionMode='standard_lottery'
+        // MUST be skipped — their aiPredictedNumbers contain number display strings like "1,7,14"
+        // that would incorrectly trigger daily rendering.
+        // Extra guard: if prediction_family='regular' (structured column) always skip.
+        $__rowFamily   = (is_object($row) && isset($row->prediction_family)) ? (string)$row->prediction_family : '';
+        $__fpsPredMode = isset($decoded['predictionMode'])                   ? (string)$decoded['predictionMode'] : '';
+        $__fpsDailyMode = ($__rowFamily !== 'regular')
+            && ($__fpsPredMode === '' || $__fpsPredMode === 'daily_digit');
+        if ($__fpsDailyMode && empty($result['combo_strings']) && !empty($decoded['aiPredictedNumbers']) && is_array($decoded['aiPredictedNumbers'])) {
             foreach ($decoded['aiPredictedNumbers'] as $__apn) {
                 if (!is_array($__apn)) { continue; }
                 $__apnStr = '';

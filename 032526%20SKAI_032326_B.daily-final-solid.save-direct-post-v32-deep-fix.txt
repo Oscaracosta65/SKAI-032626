@@ -22579,12 +22579,12 @@ function buildPayload(){
         var _fpsSets = [];
         for (var _fi2 = 0; _fi2 < _fps.length; _fi2++) {
           var _bpMain = Array.isArray(_fps[_fi2].main) ? _fps[_fi2].main : (Array.isArray(_fps[_fi2].values) ? _fps[_fi2].values : []);
-          _fpsSets.push({ rank: _fps[_fi2].rank, values: _bpMain.slice(), score: _fps[_fi2].score, display: (((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_bpMain, _pick) : _bpMain.join('')) });
+          _fpsSets.push({ rank: _fps[_fi2].rank, values: _bpMain.slice(), score: _fps[_fi2].score, display: ((_isDigitEvidence && (window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_bpMain, _pick) : _bpMain.join(',')) });
         }
         // CHG: Build aiPredictedNumbers (display-string form) – the canonical save key.
         var _bpAiPN = [];
         for (var _bpk = 0; _bpk < _fpsSets.length; _bpk++) {
-          var _bpDisp = _fpsSets[_bpk].display || (_fpsSets[_bpk].values ? window.SKAI_formatDailyComboDisplay(_fpsSets[_bpk].values, _pick) : '');
+          var _bpDisp = _fpsSets[_bpk].display || (_fpsSets[_bpk].values ? (_isDigitEvidence ? window.SKAI_formatDailyComboDisplay(_fpsSets[_bpk].values, _pick) : _fpsSets[_bpk].values.join(',')) : '');
           _bpAiPN.push({ rank: _fpsSets[_bpk].rank, values: _bpDisp, score: _fpsSets[_bpk].score, display: _bpDisp });
         }
         evidence.aiPredictedNumbers      = _bpAiPN;
@@ -23130,7 +23130,7 @@ function buildPayload(){
             var _wsets = [];
             for (var _wi = 0; _wi < _wfps.length; _wi++) {
               var _wMain = Array.isArray(_wfps[_wi].main) ? _wfps[_wi].main : (Array.isArray(_wfps[_wi].values) ? _wfps[_wi].values : []);
-              _wsets.push({ rank: _wfps[_wi].rank, values: _wMain.slice(), score: _wfps[_wi].score, display: (((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_wMain, ((window.SKAI_META && +window.SKAI_META.pick) || _wMain.length)) : _wMain.join('')) });
+              _wsets.push({ rank: _wfps[_wi].rank, values: _wMain.slice(), score: _wfps[_wi].score, display: ((_isDigitEvidence && (window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_wMain, ((window.SKAI_META && +window.SKAI_META.pick) || _wMain.length)) : _wMain.join(',')) });
             }
             evd.final_prediction_sets      = _wsets;
             evd.final_prediction_set_count = _wsets.length;
@@ -23139,7 +23139,7 @@ function buildPayload(){
             // CHG: Also build aiPredictedNumbers from the same sets.
             var _wPN = [];
             for (var _wPk = 0; _wPk < _wsets.length; _wPk++) {
-              var _wPDisp = _wsets[_wPk].display || (_wsets[_wPk].values ? ((((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_wsets[_wPk].values, ((window.SKAI_META && +window.SKAI_META.pick) || 0)) : _wsets[_wPk].values.join(''))) : '');
+              var _wPDisp = _wsets[_wPk].display || (_wsets[_wPk].values ? ((_isDigitEvidence && (window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_wsets[_wPk].values, ((window.SKAI_META && +window.SKAI_META.pick) || 0)) : _wsets[_wPk].values.join(',')) : '');
               _wPN.push({ rank: _wsets[_wPk].rank, values: _wPDisp, score: _wsets[_wPk].score, display: _wPDisp });
             }
             evd.aiPredictedNumbers      = _wPN;
@@ -32233,7 +32233,7 @@ function fmt(v){
             if (_njEntry) {
               var _njMain = Array.isArray(_njEntry.main) ? _njEntry.main : (Array.isArray(_njEntry.values) ? _njEntry.values : []);
               if (_njMain.length) {
-                var _njDisp = ((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_njMain, ((window.SKAI_META && +window.SKAI_META.pick) || _njMain.length)) : _njMain.join('');
+                var _njDisp = ((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_njMain, ((window.SKAI_META && +window.SKAI_META.pick) || _njMain.length)) : _njMain.join(',');
                 _njPsets.push({ rank: _njEntry.rank, values: _njDisp, score: (typeof _njEntry.score === 'number' ? _njEntry.score : 0), display: _njDisp });
               }
             }
@@ -32264,7 +32264,7 @@ function fmt(v){
               var _fps2Sets = _fps2Chk.final_prediction_sets;
               var _aiPN2 = [];
               for (var _ai2k = 0; _ai2k < _fps2Sets.length; _ai2k++) {
-                var _ai2Disp = _fps2Sets[_ai2k].display || (_fps2Sets[_ai2k].values ? (((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_fps2Sets[_ai2k].values, ((window.SKAI_META && +window.SKAI_META.pick) || 0)) : (_fps2Sets[_ai2k].values.join ? _fps2Sets[_ai2k].values.join('') : String(_fps2Sets[_ai2k].values))) : '');
+                var _ai2Disp = _fps2Sets[_ai2k].display || (_fps2Sets[_ai2k].values ? (((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_fps2Sets[_ai2k].values, ((window.SKAI_META && +window.SKAI_META.pick) || 0)) : (_fps2Sets[_ai2k].values.join ? _fps2Sets[_ai2k].values.join(',') : String(_fps2Sets[_ai2k].values))) : '');
                 _aiPN2.push({ rank: _fps2Sets[_ai2k].rank, values: _ai2Disp, score: _fps2Sets[_ai2k].score, display: _ai2Disp });
               }
               _fps2Chk.aiPredictedNumbers      = _aiPN2;
@@ -32279,12 +32279,12 @@ function fmt(v){
           var _fpsSets2 = [];
           for (var _fi3 = 0; _fi3 < _fps2.length; _fi3++) {
             var _fps2Main = Array.isArray(_fps2[_fi3].main) ? _fps2[_fi3].main : (Array.isArray(_fps2[_fi3].values) ? _fps2[_fi3].values : []);
-            _fpsSets2.push({ rank: _fps2[_fi3].rank, values: _fps2Main.slice(), score: _fps2[_fi3].score, display: (((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_fps2Main, ((window.SKAI_META && +window.SKAI_META.pick) || _fps2Main.length)) : _fps2Main.join('')) });
+            _fpsSets2.push({ rank: _fps2[_fi3].rank, values: _fps2Main.slice(), score: _fps2[_fi3].score, display: (((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_fps2Main, ((window.SKAI_META && +window.SKAI_META.pick) || _fps2Main.length)) : _fps2Main.join(',')) });
           }
           // CHG: Build aiPredictedNumbers (display-string form) alongside final_prediction_sets (array form).
           var _aiPN3 = [];
           for (var _ai3k = 0; _ai3k < _fpsSets2.length; _ai3k++) {
-            var _ai3Disp = _fpsSets2[_ai3k].display || (_fpsSets2[_ai3k].values ? (((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_fpsSets2[_ai3k].values, ((window.SKAI_META && +window.SKAI_META.pick) || 0)) : _fpsSets2[_ai3k].values.join('')) : '');
+            var _ai3Disp = _fpsSets2[_ai3k].display || (_fpsSets2[_ai3k].values ? (((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_fpsSets2[_ai3k].values, ((window.SKAI_META && +window.SKAI_META.pick) || 0)) : _fpsSets2[_ai3k].values.join(',')) : '');
             _aiPN3.push({ rank: _fpsSets2[_ai3k].rank, values: _ai3Disp, score: _fpsSets2[_ai3k].score, display: _ai3Disp });
           }
           var _meta2 = window.SKAI_META || {};
@@ -38752,13 +38752,18 @@ try {
             for (var _fk = 0; _fk < _fps.length; _fk++) {
               // CHG: main||values fallback so batch-restored entries (which use .values) work too
               var _fkMain = Array.isArray(_fps[_fk].main) ? _fps[_fk].main : (Array.isArray(_fps[_fk].values) ? _fps[_fk].values : []);
-              _fpsSets.push({ rank: _fps[_fk].rank, values: _fkMain.slice(), score: _fps[_fk].score, display: window.SKAI_formatDailyComboDisplay(_fkMain, _pickDigit || _fkMain.length) });
+              // [[SKAI_DISPLAY_SYNC]] For regular lotteries (EuroMillions, Powerball, etc.) the
+              // display field must use comma-joined notation ("1,7,14,25,36"), NOT the daily
+              // last-digit-concat format ("17456") produced by SKAI_formatDailyComboDisplay.
+              // Using the wrong format here causes mylottoexpertExtractDailySavedView to
+              // misidentify regular-lottery rows as daily and render them incorrectly.
+              _fpsSets.push({ rank: _fps[_fk].rank, values: _fkMain.slice(), score: _fps[_fk].score, display: _isDigitGame ? window.SKAI_formatDailyComboDisplay(_fkMain, _pickDigit || _fkMain.length) : _fkMain.join(',') });
             }
             // CHG: Build aiPredictedNumbers (canonical display-string form of the ranked sets).
             // This is the primary save key the dashboard and save pipeline read.
             var _aiPN = [];
             for (var _apk = 0; _apk < _fpsSets.length; _apk++) {
-              var _apDisp = _fpsSets[_apk].display || (_fpsSets[_apk].values ? window.SKAI_formatDailyComboDisplay(_fpsSets[_apk].values, _pickDigit || 0) : '');
+              var _apDisp = _fpsSets[_apk].display || (_fpsSets[_apk].values ? (_isDigitGame ? window.SKAI_formatDailyComboDisplay(_fpsSets[_apk].values, _pickDigit || 0) : _fpsSets[_apk].values.join(',')) : '');
               _aiPN.push({ rank: _fpsSets[_apk].rank, values: _apDisp, score: _fpsSets[_apk].score, display: _apDisp });
             }
             var _fpsPayload = {
@@ -39797,7 +39802,7 @@ try {
         var a = document.createElement('span');
         a.style.fontWeight = '700';
         a.style.color = '#0A1A33';
-        a.textContent = (((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(it.main, ((window.SKAI_META && +window.SKAI_META.pick) || it.main.length)) : it.main.join(''));
+        a.textContent = (((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(it.main, ((window.SKAI_META && +window.SKAI_META.pick) || it.main.length)) : it.main.join(', '));
 
         var b = document.createElement('span');
         b.style.color = '#7F8DAA';
@@ -48400,11 +48405,11 @@ document.addEventListener('DOMContentLoaded', function () {
         extraCount:           (function(){ var m = window.SKAI_META || {}; return ((m.extraCount || 0)|0); })(),
         comboCountSaved:      (function(){ var fps = window.SKAI_FINAL_PREDICTION_SETS; if (fps && fps.length) return fps.length|0; var c = window.SKAI_POS_COMBOS; return (c && c.length) ? (c.length|0) : 0; })(),
         top_combos:           (function(){ var fps = window.SKAI_FINAL_PREDICTION_SETS; if (fps && fps.length) { var out=[]; for (var i=0;i<fps.length&&i<5;i++){var m=Array.isArray(fps[i].main)?fps[i].main:(Array.isArray(fps[i].values)?fps[i].values:[]);out.push({rank:fps[i].rank,main:m.slice(),score:fps[i].score});} return out; } var c = window.SKAI_POS_COMBOS; return (c && c.length) ? c.slice(0, 5) : []; })(),
-        final_prediction_sets:(function(){ var fps = window.SKAI_FINAL_PREDICTION_SETS; if (fps && fps.length) { var out=[]; for (var i=0;i<fps.length;i++){var m=Array.isArray(fps[i].main)?fps[i].main:(Array.isArray(fps[i].values)?fps[i].values:[]);var d=(typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(m, ((window.SKAI_META && +window.SKAI_META.pick) || m.length)) : m.join('');out.push({rank:fps[i].rank,values:m.slice(),score:fps[i].score,display:d});} return out; } return []; })(),
+        final_prediction_sets:(function(){ var fps = window.SKAI_FINAL_PREDICTION_SETS; if (fps && fps.length) { var out=[]; for (var i=0;i<fps.length;i++){var m=Array.isArray(fps[i].main)?fps[i].main:(Array.isArray(fps[i].values)?fps[i].values:[]);var d=((window.SKAI_META&&window.SKAI_META.isDailyDigitGame)&&typeof window.SKAI_formatDailyComboDisplay==='function')?window.SKAI_formatDailyComboDisplay(m,((window.SKAI_META&&+window.SKAI_META.pick)||m.length)):m.join(',');out.push({rank:fps[i].rank,values:m.slice(),score:fps[i].score,display:d});} return out; } return []; })(),
         // CHG: aiPredictedNumbers - canonical display-string key matching the save payload format.
-        aiPredictedNumbers:   (function(){ var fps = window.SKAI_FINAL_PREDICTION_SETS; if (fps && fps.length) { var out=[]; for (var i=0;i<fps.length;i++){var m=Array.isArray(fps[i].main)?fps[i].main:(Array.isArray(fps[i].values)?fps[i].values:[]);var d=(typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(m, ((window.SKAI_META && +window.SKAI_META.pick) || m.length)) : m.join('');out.push({rank:fps[i].rank,values:d,score:fps[i].score,display:d});} return out; } return []; })(),
+        aiPredictedNumbers:   (function(){ var fps = window.SKAI_FINAL_PREDICTION_SETS; if (fps && fps.length) { var out=[]; for (var i=0;i<fps.length;i++){var m=Array.isArray(fps[i].main)?fps[i].main:(Array.isArray(fps[i].values)?fps[i].values:[]);var d=((window.SKAI_META&&window.SKAI_META.isDailyDigitGame)&&typeof window.SKAI_formatDailyComboDisplay==='function')?window.SKAI_formatDailyComboDisplay(m,((window.SKAI_META&&+window.SKAI_META.pick)||m.length)):m.join(',');out.push({rank:fps[i].rank,values:d,score:fps[i].score,display:d});} return out; } return []; })(),
         aiPredictedNumbersCount: (function(){ var fps = window.SKAI_FINAL_PREDICTION_SETS; return (fps && fps.length) ? fps.length|0 : 0; })(),
-        primaryPrediction:    (function(){ var fps = window.SKAI_FINAL_PREDICTION_SETS; if (fps && fps.length) { var m=Array.isArray(fps[0].main)?fps[0].main:(Array.isArray(fps[0].values)?fps[0].values:[]); var d=(typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(m, ((window.SKAI_META && +window.SKAI_META.pick) || m.length)) : m.join(''); return {rank:fps[0].rank,values:d,score:fps[0].score,display:d}; } return null; })(),
+        primaryPrediction:    (function(){ var fps = window.SKAI_FINAL_PREDICTION_SETS; if (fps && fps.length) { var m=Array.isArray(fps[0].main)?fps[0].main:(Array.isArray(fps[0].values)?fps[0].values:[]); var d=((window.SKAI_META&&window.SKAI_META.isDailyDigitGame)&&typeof window.SKAI_formatDailyComboDisplay==='function')?window.SKAI_formatDailyComboDisplay(m,((window.SKAI_META&&+window.SKAI_META.pick)||m.length)):m.join(','); return {rank:fps[0].rank,values:d,score:fps[0].score,display:d}; } return null; })(),
         // Additional inference params from SKAI_SETTINGS (for full parity)
         window_size:          drawsUsed, // total draws analyzed, same as skai_window
         ml_window_size:       (typeof S.windowSize === 'number') ? S.windowSize : null, // ML sliding window (small)
@@ -49633,7 +49638,7 @@ document.addEventListener('DOMContentLoaded', function () {
             var _bFpsSets = _bFpsParsed.final_prediction_sets;
             var _bAiPN = [];
             for (var _bAk = 0; _bAk < _bFpsSets.length; _bAk++) {
-              var _bADisp = _bFpsSets[_bAk].display || (_bFpsSets[_bAk].values ? ((((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_bFpsSets[_bAk].values, ((window.SKAI_META && +window.SKAI_META.pick) || 0)) : (_bFpsSets[_bAk].values.join ? _bFpsSets[_bAk].values.join('') : String(_bFpsSets[_bAk].values)))) : '');
+              var _bADisp = _bFpsSets[_bAk].display || (_bFpsSets[_bAk].values ? ((((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_bFpsSets[_bAk].values, ((window.SKAI_META && +window.SKAI_META.pick) || 0)) : (_bFpsSets[_bAk].values.join ? _bFpsSets[_bAk].values.join(',') : String(_bFpsSets[_bAk].values)))) : '');
               _bAiPN.push({ rank: _bFpsSets[_bAk].rank, values: _bADisp, score: _bFpsSets[_bAk].score, display: _bADisp });
             }
             _bFpsParsed.aiPredictedNumbers      = _bAiPN;
