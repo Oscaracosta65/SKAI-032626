@@ -1853,6 +1853,12 @@ function SKAI_runAdminMigration(): array
         $details['schema_upgrade'] = $r;
     }
 
+    // [[SKAI_DISPLAY_SYNC]] Schema upgrade for display/save/render structured fields.
+    if (function_exists('skaiEnsureUserSavedNumbersCols')) {
+        $r = skaiEnsureUserSavedNumbersCols();
+        $details['user_saved_numbers_display_sync'] = $r;
+    }
+
     // Idempotent migration: ensure game_id VARCHAR(50) in #__skai_shared_learning.
     if (function_exists('SKAI_runSharedLearningLotteryIdMigration')) {
         $r = SKAI_runSharedLearningLotteryIdMigration();
@@ -6778,6 +6784,77 @@ function SKAI_runSafeSchemaUpgrade() {
 }
 
 /**
+ * [[SKAI_DISPLAY_SYNC]] Idempotent schema upgrade for #__user_saved_numbers.
+ * Adds structured display/save fields required for display-save-render parity.
+ * Safe to call multiple times. Never destroys existing data. PHP 8.1 / Joomla 5.1.2 compatible.
+ *
+ * @return array{success:bool,message:string,added:array,skipped:array}
+ */
+function skaiEnsureUserSavedNumbersCols()
+{
+    static $__sdsDone = null;
+    if ($__sdsDone !== null) { return $__sdsDone; }
+    try {
+        $db   = \Joomla\CMS\Factory::getDbo();
+        $cols = $db->getTableColumns('#__user_saved_numbers', false);
+        if (!is_array($cols)) {
+            return $__sdsDone = ['success' => false, 'message' => 'Could not read #__user_saved_numbers columns', 'added' => [], 'skipped' => []];
+        }
+        $prefix = $db->getPrefix();
+        $table  = $prefix . 'user_saved_numbers';
+        $added   = [];
+        $skipped = [];
+
+        // Column definitions: name => SQL definition (no AFTER clause for portability)
+        $newCols = [
+            'save_schema_version'           => "INT NOT NULL DEFAULT 2 COMMENT 'Schema version marker for structured display fields'",
+            'prediction_family'             => "VARCHAR(30) NULL COMMENT 'regular or daily'",
+            'prediction_type'               => "VARCHAR(50) NULL COMMENT 'powerball euromillions pick3 pick4 pick5 etc'",
+            'render_mode'                   => "VARCHAR(40) NULL COMMENT 'regular_main_extra or daily_combos'",
+            'main_display_json'             => "TEXT NULL COMMENT 'JSON array of main display numbers in probability order'",
+            'extra_display_json'            => "TEXT NULL COMMENT 'JSON array of extra/bonus display numbers in probability order'",
+            'canonical_main_display'        => "VARCHAR(500) NULL COMMENT 'CSV of main display numbers canonical probability order'",
+            'canonical_extra_display'       => "VARCHAR(200) NULL COMMENT 'CSV of extra display numbers canonical'",
+            'prediction_extra_display_count' => "INT NULL COMMENT 'Count of extra/bonus numbers in display set'",
+            'regular_main_numbers_json'     => "TEXT NULL COMMENT 'Regular lottery: JSON array of main numbers for display'",
+            'regular_extra_numbers_json'    => "TEXT NULL COMMENT 'Regular lottery: JSON array of extra/bonus numbers for display'",
+            'daily_pick_size'               => "TINYINT NULL COMMENT 'Daily lottery: pick size 3 4 or 5'",
+            'daily_primary_prediction'      => "VARCHAR(30) NULL COMMENT 'Daily lottery: primary combo display string e.g. 123'",
+            'daily_primary_prediction_json' => "TEXT NULL COMMENT 'Daily lottery: JSON array of primary combo digits'",
+            'daily_top_picks_json'          => "TEXT NULL COMMENT 'Daily lottery: JSON array of top-5 combo display strings'",
+            'daily_top_pick_strings_json'   => "TEXT NULL COMMENT 'Daily lottery: JSON array of top-5 combo strings with bonus display'",
+            'daily_bonus_digits_json'       => "TEXT NULL COMMENT 'Daily lottery: JSON array of bonus digit integers'",
+            'daily_influential_digits_json' => "TEXT NULL COMMENT 'Daily lottery: JSON array of ranked/influential digit integers'",
+            'daily_display_payload_json'    => "MEDIUMTEXT NULL COMMENT 'Daily lottery: full canonical display payload for rendering'",
+            'daily_learning_payload_json'   => "MEDIUMTEXT NULL COMMENT 'Daily lottery: structured payload for learning/tracking'",
+            'display_variant'               => "VARCHAR(40) NULL COMMENT 'Renderer display variant hint'",
+            'renderer_hint'                 => "VARCHAR(40) NULL COMMENT 'Renderer hint for MyLottoExpert display logic'",
+            'canonical_display_string'      => "VARCHAR(500) NULL COMMENT 'Human-readable canonical display summary string'",
+        ];
+
+        foreach ($newCols as $colName => $colDef) {
+            if (isset($cols[$colName])) {
+                $skipped[] = $colName;
+                continue;
+            }
+            try {
+                $db->setQuery("ALTER TABLE `{$table}` ADD COLUMN `{$colName}` {$colDef}");
+                $db->execute();
+                $added[] = $colName;
+            } catch (\Throwable $e) {
+                error_log('[SKAI_DISPLAY_SYNC] skaiEnsureUserSavedNumbersCols: failed to add ' . $colName . ': ' . $e->getMessage());
+            }
+        }
+        $msg = 'skaiEnsureUserSavedNumbersCols complete: added=[' . implode(',', $added) . '] skipped=' . count($skipped);
+        error_log('[SKAI_DISPLAY_SYNC] ' . $msg);
+        return $__sdsDone = ['success' => true, 'message' => $msg, 'added' => $added, 'skipped' => $skipped];
+    } catch (\Throwable $e) {
+        error_log('[SKAI_DISPLAY_SYNC] skaiEnsureUserSavedNumbersCols error: ' . $e->getMessage());
+        return $__sdsDone = ['success' => false, 'message' => $e->getMessage(), 'added' => [], 'skipped' => []];
+    }
+}
+
+/**
  * [[SKAI_PHASE_C]] Idempotent migration: ensure game_id VARCHAR(50) in #__skai_shared_learning.
  *
  * Canonical shared-learning identity is the string game_id (e.g. "101", "AZ2"), not the
@@ -9209,6 +9286,108 @@ $skaiSettings = [
 // Encode once here; DB insert step will keep it as string
 $skaiSettingsJson = json_encode($skaiSettings, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 
+// [[SKAI_DISPLAY_SYNC]] Compute structured display fields for save/render parity
+$__lNameForType = strtolower((string)($lotteryConfig['lotteryName'] ?? $lotteryConfig['lottery_name'] ?? $lotteryConfig['game_name'] ?? ''));
+if (strpos($__lNameForType, 'powerball') !== false) {
+    $__predType = 'powerball';
+} elseif (strpos($__lNameForType, 'euro') !== false && strpos($__lNameForType, 'million') !== false) {
+    $__predType = 'euromillions';
+} elseif ($isDailyGamePosted) {
+    $__ps = (int)($cfgPick ?: ($pickLength ?? 0) ?: count($mainArr));
+    if ($__ps === 3) { $__predType = 'pick3'; }
+    elseif ($__ps === 4) { $__predType = 'pick4'; }
+    elseif ($__ps === 5) { $__predType = 'pick5'; }
+    else { $__predType = 'daily'; }
+} else {
+    $__predType = 'regular';
+}
+
+$__dailyPickSizeRow    = $isDailyGamePosted ? (int)($cfgPick ?: ($pickLength ?? 0) ?: count($mainArr)) : null;
+$__dailyPrimPredRow    = null;
+$__dailyPrimPredDigits = null;
+$__dailyTopPicksRow    = null;
+$__dailyTopPickStrRow  = null;
+$__dailyBonusDigRow    = null;
+$__dailyInflDigRow     = null;
+$__dailyDispPayload    = null;
+$__dailyLearnPayload   = null;
+
+if ($isDailyGamePosted) {
+    // Primary prediction display string
+    if (!empty($dailyDisplayMain)) {
+        $__dailyPrimPredRow = (string)$dailyDisplayMain;
+    } elseif (is_array($evidenceDecoded) && !empty($evidenceDecoded['daily_primary_combo_display'])) {
+        $__dailyPrimPredRow = (string)$evidenceDecoded['daily_primary_combo_display'];
+    } elseif (is_array($evidenceDecoded) && !empty($evidenceDecoded['daily_primary_combo'])) {
+        $__dailyPrimPredRow = (string)$evidenceDecoded['daily_primary_combo'];
+    } elseif (!empty($dailyDisplaySet)) {
+        $__dailyPrimPredRow = (string)$dailyDisplaySet[0];
+    }
+
+    // Primary prediction digits (JSON array)
+    if (is_array($evidenceDecoded) && !empty($evidenceDecoded['daily_primary_combo_digits']) && is_array($evidenceDecoded['daily_primary_combo_digits'])) {
+        $__dailyPrimPredDigits = json_encode(array_values(array_map('intval', $evidenceDecoded['daily_primary_combo_digits'])), JSON_UNESCAPED_SLASHES);
+    } elseif (!empty($__dailyPrimPredRow)) {
+        preg_match_all('/\d/', (string)$__dailyPrimPredRow, $__dm);
+        $__dailyPrimPredDigits = !empty($__dm[0]) ? json_encode(array_map('intval', $__dm[0]), JSON_UNESCAPED_SLASHES) : null;
+    }
+
+    // Top picks (combo display strings, JSON array)
+    if (!empty($dailyDisplaySet)) {
+        $__dailyTopPicksRow = json_encode(array_values($dailyDisplaySet), JSON_UNESCAPED_SLASHES);
+    } elseif (is_array($evidenceDecoded) && !empty($evidenceDecoded['daily_combo_strings']) && is_array($evidenceDecoded['daily_combo_strings'])) {
+        $__dailyTopPicksRow = json_encode(array_values($evidenceDecoded['daily_combo_strings']), JSON_UNESCAPED_SLASHES);
+    } elseif (is_array($evidenceDecoded) && !empty($evidenceDecoded['daily_top_combo_strings']) && is_array($evidenceDecoded['daily_top_combo_strings'])) {
+        $__dailyTopPicksRow = json_encode(array_values($evidenceDecoded['daily_top_combo_strings']), JSON_UNESCAPED_SLASHES);
+    }
+
+    // Bonus digits (JSON array of ints)
+    if (is_array($evidenceDecoded) && !empty($evidenceDecoded['daily_bonus_digits']) && is_array($evidenceDecoded['daily_bonus_digits'])) {
+        $__dailyBonusDigRow = json_encode(array_values(array_map('intval', $evidenceDecoded['daily_bonus_digits'])), JSON_UNESCAPED_SLASHES);
+    } elseif (!empty($extraArr)) {
+        $__dailyBonusDigRow = json_encode(array_values(array_map('intval', $extraArr)), JSON_UNESCAPED_SLASHES);
+    }
+
+    // Influential/ranked digits (JSON array of ints)
+    if (is_array($evidenceDecoded) && !empty($evidenceDecoded['daily_ranked_digits']) && is_array($evidenceDecoded['daily_ranked_digits'])) {
+        $__dailyInflDigRow = json_encode(array_values(array_map('intval', $evidenceDecoded['daily_ranked_digits'])), JSON_UNESCAPED_SLASHES);
+    }
+
+    // Top pick strings with bonus (JSON array of strings like "123 + Bonus 03 07")
+    $__topPicksForStr = !empty($dailyDisplaySet) ? array_values($dailyDisplaySet) : [];
+    if (!empty($__topPicksForStr)) {
+        $__bonusForStr = !empty($extraArr) ? array_values(array_map('intval', $extraArr)) : [];
+        if (!empty($__bonusForStr)) {
+            $__bonusDispForStr = array_map(static function($n) { $n=(int)$n; return ($n>=0&&$n<10)?('0'.$n):(string)$n; }, $__bonusForStr);
+            $__bonusSuffixStr  = ' + Bonus ' . implode(' ', $__bonusDispForStr);
+            $__dailyTopPickStrRow = json_encode(array_map(static function($s) use ($__bonusSuffixStr){ return $s . $__bonusSuffixStr; }, $__topPicksForStr), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        } else {
+            $__dailyTopPickStrRow = json_encode($__topPicksForStr, JSON_UNESCAPED_SLASHES);
+        }
+    }
+
+    // Daily display payload (canonical structured payload for rendering)
+    $__dailyDispPayload = json_encode([
+        'pick_size'          => $__dailyPickSizeRow,
+        'primary_prediction' => $__dailyPrimPredRow,
+        'top_picks'          => !empty($dailyDisplaySet) ? array_values($dailyDisplaySet) : [],
+        'bonus_digits'       => !empty($extraArr) ? array_values(array_map('intval', $extraArr)) : [],
+        'influential_digits' => (is_array($evidenceDecoded) && !empty($evidenceDecoded['daily_ranked_digits'])) ? array_values(array_map('intval', $evidenceDecoded['daily_ranked_digits'])) : [],
+        'schema_version'     => 2,
+    ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+
+    // Daily learning payload (preserve for calibration/learning/tracking - DO NOT REMOVE)
+    $__dailyLearnPayload = json_encode([
+        'pick_size'            => $__dailyPickSizeRow,
+        'primary_prediction'   => $__dailyPrimPredRow,
+        'top_picks'            => !empty($dailyDisplaySet) ? array_values($dailyDisplaySet) : [],
+        'ranked_digits'        => (is_array($evidenceDecoded) && !empty($evidenceDecoded['daily_ranked_digits'])) ? array_values(array_map('intval', $evidenceDecoded['daily_ranked_digits'])) : [],
+        'bonus_digits'         => !empty($extraArr) ? array_values(array_map('intval', $extraArr)) : [],
+        'primary_combo_digits' => (is_array($evidenceDecoded) && !empty($evidenceDecoded['daily_primary_combo_digits'])) ? array_values(array_map('intval', $evidenceDecoded['daily_primary_combo_digits'])) : [],
+        'schema_version'       => 2,
+    ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+}
+
 $row = (object) [
     'user_id'             => (int) $user->id,
     'lottery_id'          => (int) $lotteryId,
@@ -9303,6 +9482,29 @@ $row = (object) [
 
     // CHG: Persist digit probabilities for Pick3/Pick4/Daily games
     'digit_probabilities' => !empty($digitProbsJson) ? $digitProbsJson : null,
+
+    // [[SKAI_DISPLAY_SYNC]] Structured display/save fields for render parity
+    'save_schema_version'            => 2,
+    'prediction_family'              => $isDailyGamePosted ? 'daily' : 'regular',
+    'prediction_type'                => $__predType,
+    'render_mode'                    => $isDailyGamePosted ? 'daily_combos' : 'regular_main_extra',
+    'main_display_json'              => !empty($mainArr) ? json_encode(array_values($mainArr), JSON_UNESCAPED_SLASHES) : null,
+    'extra_display_json'             => !empty($extraArr) ? json_encode(array_values($extraArr), JSON_UNESCAPED_SLASHES) : null,
+    'canonical_main_display'         => ($mainCsv !== '') ? (string)$mainCsv : null,
+    'canonical_extra_display'        => !empty($extraCsv) ? (string)$extraCsv : null,
+    'prediction_extra_display_count' => !empty($extraArr) ? count($extraArr) : 0,
+    'regular_main_numbers_json'      => (!$isDailyGamePosted && !empty($mainArr)) ? json_encode(array_values($mainArr), JSON_UNESCAPED_SLASHES) : null,
+    'regular_extra_numbers_json'     => (!$isDailyGamePosted && !empty($extraArr)) ? json_encode(array_values($extraArr), JSON_UNESCAPED_SLASHES) : null,
+    'daily_pick_size'                => $__dailyPickSizeRow,
+    'daily_primary_prediction'       => $__dailyPrimPredRow,
+    'daily_primary_prediction_json'  => $__dailyPrimPredDigits,
+    'daily_top_picks_json'           => $__dailyTopPicksRow,
+    'daily_top_pick_strings_json'    => $__dailyTopPickStrRow,
+    'daily_bonus_digits_json'        => $__dailyBonusDigRow,
+    'daily_influential_digits_json'  => $__dailyInflDigRow,
+    'daily_display_payload_json'     => $__dailyDispPayload,
+    'daily_learning_payload_json'    => $__dailyLearnPayload,
+    'renderer_hint'                  => $isDailyGamePosted ? 'daily_combos' : 'regular_balls',
 ];
 
         // Normalize: convert empty strings to NULL to avoid '' in nullable columns
@@ -9328,6 +9530,11 @@ $row = (object) [
             }
             if (isset($row->game_id)) {
                 unset($row->game_id); // prevent 1054 from unknown column in this table
+            }
+
+            // [[SKAI_DISPLAY_SYNC]] Ensure new structured columns exist before whitelist filter
+            if (function_exists('skaiEnsureUserSavedNumbersCols')) {
+                skaiEnsureUserSavedNumbersCols();
             }
 
             // 2) Whitelist from live DB schema to avoid unknown columns (e.g., game_id)
@@ -13247,6 +13454,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_set']) && !defin
             // Timestamps (legacy installs)
             'created_at'        => $now,
             'updated_at'        => $now,
+
+            // [[SKAI_DISPLAY_SYNC]] Structured display fields (legacy handler)
+            'save_schema_version'            => 2,
+            'prediction_family'              => $isDailyGamePosted ? 'daily' : 'regular',
+            'prediction_type'                => (function() use ($isDailyGamePosted, $lotteryConfig, $cfgPickPosted, $main) {
+                $ln = strtolower((string)($lotteryConfig['lotteryName'] ?? $lotteryConfig['lottery_name'] ?? ''));
+                if (strpos($ln, 'powerball') !== false) { return 'powerball'; }
+                if (strpos($ln, 'euro') !== false && strpos($ln, 'million') !== false) { return 'euromillions'; }
+                if ($isDailyGamePosted) {
+                    $ps = (int)$cfgPickPosted ?: count((array)$main);
+                    if ($ps === 3) { return 'pick3'; }
+                    if ($ps === 4) { return 'pick4'; }
+                    if ($ps === 5) { return 'pick5'; }
+                    return 'daily';
+                }
+                return 'regular';
+            })(),
+            'render_mode'                    => $isDailyGamePosted ? 'daily_combos' : 'regular_main_extra',
+            'main_display_json'              => !empty($main) ? json_encode(array_values((array)$main), JSON_UNESCAPED_SLASHES) : null,
+            'extra_display_json'             => !empty($extra) ? json_encode(array_values((array)$extra), JSON_UNESCAPED_SLASHES) : null,
+            'canonical_main_display'         => $isDailyGamePosted ? (($isDailyGamePosted && isset($dailyComboStrings) && !empty($dailyComboStrings)) ? implode(',', $dailyComboStrings) : null) : (!empty($main) ? implode(',', array_values((array)$main)) : null),
+            'canonical_extra_display'        => !empty($extra) ? implode(',', array_values((array)$extra)) : null,
+            'prediction_extra_display_count' => !empty($extra) ? count((array)$extra) : 0,
+            'daily_pick_size'                => $isDailyGamePosted ? ((int)$cfgPickPosted ?: null) : null,
+            'daily_primary_prediction'       => ($isDailyGamePosted && isset($dailyComboStrings) && !empty($dailyComboStrings)) ? (string)$dailyComboStrings[0] : null,
+            'daily_top_picks_json'           => ($isDailyGamePosted && isset($dailyComboStrings) && !empty($dailyComboStrings)) ? json_encode(array_values($dailyComboStrings), JSON_UNESCAPED_SLASHES) : null,
+            'daily_bonus_digits_json'        => ($isDailyGamePosted && !empty($extra)) ? json_encode(array_values(array_map('intval', (array)$extra)), JSON_UNESCAPED_SLASHES) : null,
+            'daily_influential_digits_json'  => ($isDailyGamePosted && isset($rankedDailyDigits) && !empty($rankedDailyDigits)) ? json_encode(array_values($rankedDailyDigits), JSON_UNESCAPED_SLASHES) : null,
+            'renderer_hint'                  => $isDailyGamePosted ? 'daily_combos' : 'regular_balls',
         ];
         $insert = [];
         foreach ($columns as $c => $v) {
