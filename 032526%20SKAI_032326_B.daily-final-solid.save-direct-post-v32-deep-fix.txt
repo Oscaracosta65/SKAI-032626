@@ -8650,6 +8650,8 @@ $labelInput = implode(' - ', $parts);
         // individual daily digits. For Pick 3/4, numbers_json.main_numbers = [1,2,7] which
         // is the correct digit-level array; dailyDisplaySet contains combo display strings
         // like ["127","350"] that must NOT overwrite it (they would corrupt main_numbers).
+        // NOTE: line 8610 may have already overwritten $mainArr with $dailyDisplaySet
+        // (combo strings), so we check against that state.
         $hasValidDailyDigits = $isDaily && !empty($mainArr)
             && (max(array_map('intval', $mainArr)) <= 9);
         if ($isDailyGamePosted && !empty($dailyDisplaySet) && !$hasValidDailyDigits) {
@@ -8657,6 +8659,10 @@ $labelInput = implode(' - ', $parts);
             $firstComboStr    = preg_replace('/[^0-9]/', '', (string)($dailyDisplaySet[0] ?? ''));
             $firstComboDigits = array_values(array_map('intval', str_split($firstComboStr)));
             $mainArr = !empty($firstComboDigits) ? $firstComboDigits : array_values($dailyDisplaySet);
+            // CHG: Re-evaluate after extracting digits so all downstream guards ($hasValidDailyDigits)
+            // see the corrected digit-level array and do not overwrite it again.
+            $hasValidDailyDigits = $isDaily && !empty($mainArr)
+                && (max(array_map('intval', $mainArr)) <= 9);
         } else {
             $mainArr  = $norm($mainArr,  $isDaily, $isDailyGamePosted);
         }
