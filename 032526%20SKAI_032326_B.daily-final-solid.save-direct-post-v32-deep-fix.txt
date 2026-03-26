@@ -9505,6 +9505,12 @@ $row = (object) [
     'daily_display_payload_json'     => $__dailyDispPayload,
     'daily_learning_payload_json'    => $__dailyLearnPayload,
     'renderer_hint'                  => $isDailyGamePosted ? 'daily_combos' : 'regular_balls',
+    'display_variant'                => $isDailyGamePosted
+        ? ('daily_' . ($__predType !== 'daily' ? $__predType : 'pick'))
+        : ($__predType !== 'regular' ? $__predType : 'regular_lottery'),
+    'canonical_display_string'       => $isDailyGamePosted
+        ? ('Pick ' . (string)($__dailyPickSizeRow ?: '?') . ' - Top 5 Combos' . (!empty($extraArr) ? ' + Bonus' : ''))
+        : (count($mainArr) . ' main' . (!empty($extraArr) ? ' + ' . count($extraArr) . ' bonus' : '')),
 ];
 
         // Normalize: convert empty strings to NULL to avoid '' in nullable columns
@@ -13479,10 +13485,78 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_set']) && !defin
             'prediction_extra_display_count' => !empty($extra) ? count((array)$extra) : 0,
             'daily_pick_size'                => $isDailyGamePosted ? ((int)$cfgPickPosted ?: null) : null,
             'daily_primary_prediction'       => ($isDailyGamePosted && isset($dailyComboStrings) && !empty($dailyComboStrings)) ? (string)$dailyComboStrings[0] : null,
+            'daily_primary_prediction_json'  => (function() use ($isDailyGamePosted, $dailyComboStrings) {
+                if (!$isDailyGamePosted || !isset($dailyComboStrings) || empty($dailyComboStrings)) { return null; }
+                $ds = (string)$dailyComboStrings[0];
+                preg_match_all('/\d/', $ds, $__m);
+                return !empty($__m[0]) ? json_encode(array_map('intval', $__m[0]), JSON_UNESCAPED_SLASHES) : null;
+            })(),
             'daily_top_picks_json'           => ($isDailyGamePosted && isset($dailyComboStrings) && !empty($dailyComboStrings)) ? json_encode(array_values($dailyComboStrings), JSON_UNESCAPED_SLASHES) : null,
+            'daily_top_pick_strings_json'    => (function() use ($isDailyGamePosted, $dailyComboStrings, $extra) {
+                if (!$isDailyGamePosted || !isset($dailyComboStrings) || empty($dailyComboStrings)) { return null; }
+                $extraArr = is_array($extra) ? array_values(array_map('intval', $extra)) : array();
+                if (!empty($extraArr)) {
+                    $bonusDisp = array_map(static function($n) { $n=(int)$n; return ($n>=0&&$n<=9)?('0'.$n):(string)$n; }, $extraArr);
+                    $suffix    = ' + Bonus ' . implode(' ', $bonusDisp);
+                    return json_encode(array_map(static function($s) use ($suffix){ return $s . $suffix; }, array_values($dailyComboStrings)), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+                }
+                return json_encode(array_values($dailyComboStrings), JSON_UNESCAPED_SLASHES);
+            })(),
             'daily_bonus_digits_json'        => ($isDailyGamePosted && !empty($extra)) ? json_encode(array_values(array_map('intval', (array)$extra)), JSON_UNESCAPED_SLASHES) : null,
             'daily_influential_digits_json'  => ($isDailyGamePosted && isset($rankedDailyDigits) && !empty($rankedDailyDigits)) ? json_encode(array_values($rankedDailyDigits), JSON_UNESCAPED_SLASHES) : null,
+            'daily_display_payload_json'     => (function() use ($isDailyGamePosted, $cfgPickPosted, $dailyComboStrings, $extra, $rankedDailyDigits, $main) {
+                if (!$isDailyGamePosted) { return null; }
+                $pickSz = (int)$cfgPickPosted ?: count((array)$main);
+                $combos = (isset($dailyComboStrings) && is_array($dailyComboStrings)) ? array_values($dailyComboStrings) : array();
+                return json_encode(array(
+                    'pick_size'          => $pickSz ?: null,
+                    'primary_prediction' => !empty($combos) ? (string)$combos[0] : null,
+                    'top_picks'          => $combos,
+                    'bonus_digits'       => !empty($extra) ? array_values(array_map('intval', (array)$extra)) : array(),
+                    'influential_digits' => (isset($rankedDailyDigits) && is_array($rankedDailyDigits)) ? array_values($rankedDailyDigits) : array(),
+                    'schema_version'     => 2,
+                ), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            })(),
+            'daily_learning_payload_json'    => (function() use ($isDailyGamePosted, $cfgPickPosted, $dailyComboStrings, $extra, $rankedDailyDigits, $main) {
+                if (!$isDailyGamePosted) { return null; }
+                $pickSz = (int)$cfgPickPosted ?: count((array)$main);
+                $combos = (isset($dailyComboStrings) && is_array($dailyComboStrings)) ? array_values($dailyComboStrings) : array();
+                $primaryStr    = !empty($combos) ? (string)$combos[0] : '';
+                preg_match_all('/\d/', $primaryStr, $__dm);
+                $primaryDigits = !empty($__dm[0]) ? array_map('intval', $__dm[0]) : array();
+                return json_encode(array(
+                    'pick_size'            => $pickSz ?: null,
+                    'primary_prediction'   => !empty($combos) ? (string)$combos[0] : null,
+                    'top_picks'            => $combos,
+                    'ranked_digits'        => (isset($rankedDailyDigits) && is_array($rankedDailyDigits)) ? array_values($rankedDailyDigits) : array(),
+                    'bonus_digits'         => !empty($extra) ? array_values(array_map('intval', (array)$extra)) : array(),
+                    'primary_combo_digits' => $primaryDigits,
+                    'schema_version'       => 2,
+                ), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            })(),
+            'regular_main_numbers_json'      => (!$isDailyGamePosted && !empty($main)) ? json_encode(array_values((array)$main), JSON_UNESCAPED_SLASHES) : null,
+            'regular_extra_numbers_json'     => (!$isDailyGamePosted && !empty($extra)) ? json_encode(array_values((array)$extra), JSON_UNESCAPED_SLASHES) : null,
             'renderer_hint'                  => $isDailyGamePosted ? 'daily_combos' : 'regular_balls',
+            'display_variant'                => (function() use ($isDailyGamePosted, $cfgPickPosted, $lotteryConfig, $main) {
+                $ln = strtolower((string)($lotteryConfig['lotteryName'] ?? $lotteryConfig['lottery_name'] ?? ''));
+                if (strpos($ln, 'powerball') !== false) { return 'powerball'; }
+                if (strpos($ln, 'euro') !== false && strpos($ln, 'million') !== false) { return 'euromillions'; }
+                if ($isDailyGamePosted) {
+                    $ps = (int)$cfgPickPosted ?: count((array)$main);
+                    return 'daily_pick' . ($ps ?: '');
+                }
+                return 'regular_lottery';
+            })(),
+            'canonical_display_string'       => (function() use ($isDailyGamePosted, $cfgPickPosted, $dailyComboStrings, $extra, $main) {
+                if ($isDailyGamePosted) {
+                    $ps = (int)$cfgPickPosted ?: count((array)$main);
+                    $suffix = !empty($extra) ? ' + Bonus' : '';
+                    return 'Pick ' . ($ps ?: '?') . ' - Top 5 Combos' . $suffix;
+                }
+                $mc = count((array)$main);
+                $ec = count((array)$extra);
+                return $mc . ' main' . ($ec > 0 ? ' + ' . $ec . ' bonus' : '');
+            })(),
         ];
         $insert = [];
         foreach ($columns as $c => $v) {

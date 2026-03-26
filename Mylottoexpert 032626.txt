@@ -5269,6 +5269,96 @@ function mylottoexpertFormatBonusDigit($n)
     return ($n >= 0 && $n <= 9) ? ('0' . $n) : (string)$n;
 }
 
+/**
+ * [[SKAI_DISPLAY_SYNC]] Extract regular-lottery display numbers from structured columns.
+ * Prefers new structured JSON fields; falls back to legacy CSV fields.
+ * Returns ['main' => int[], 'extra' => int[], 'main_count' => int, 'extra_count' => int]
+ */
+function mylottoexpertExtractRegularSavedView($row)
+{
+    $result = array(
+        'main'        => array(),
+        'extra'       => array(),
+        'main_count'  => 0,
+        'extra_count' => 0,
+        'used_structured' => false
+    );
+
+    // 1. Prefer regular_main_numbers_json (most explicit structured source)
+    if (is_object($row) && !empty($row->regular_main_numbers_json)) {
+        $__decoded = json_decode((string)$row->regular_main_numbers_json, true);
+        if (is_array($__decoded) && !empty($__decoded)) {
+            $result['main'] = array_values(array_map('intval', $__decoded));
+            $result['used_structured'] = true;
+        }
+    }
+
+    // 2. Prefer main_display_json as second choice
+    if (empty($result['main']) && is_object($row) && !empty($row->main_display_json)) {
+        $__decoded = json_decode((string)$row->main_display_json, true);
+        if (is_array($__decoded) && !empty($__decoded)) {
+            $result['main'] = array_values(array_map('intval', $__decoded));
+            $result['used_structured'] = true;
+        }
+    }
+
+    // 3. Fall back to legacy main_numbers CSV
+    if (empty($result['main'])) {
+        $__raw = is_object($row) ? (string)($row->main_numbers ?? '') : (string)($row['main_numbers'] ?? '');
+        if ($__raw !== '') {
+            $__raw = ltrim($__raw, '['); // strip JSON array chars if stored as JSON
+            $__raw = rtrim($__raw, ']');
+            $__arr = json_decode('[' . $__raw . ']', true);
+            if (is_array($__arr) && !empty($__arr)) {
+                $result['main'] = array_values(array_map('intval', $__arr));
+            } else {
+                $__parts = explode(',', $__raw);
+                foreach ($__parts as $__p) {
+                    $__p = trim((string)$__p, ' "\'');
+                    if ($__p !== '') { $result['main'][] = (int)$__p; }
+                }
+            }
+        }
+    }
+
+    // 4. Prefer regular_extra_numbers_json
+    if (is_object($row) && !empty($row->regular_extra_numbers_json)) {
+        $__decoded = json_decode((string)$row->regular_extra_numbers_json, true);
+        if (is_array($__decoded) && !empty($__decoded)) {
+            $result['extra'] = array_values(array_map('intval', $__decoded));
+        }
+    }
+
+    // 5. Prefer extra_display_json as second choice
+    if (empty($result['extra']) && is_object($row) && !empty($row->extra_display_json)) {
+        $__decoded = json_decode((string)$row->extra_display_json, true);
+        if (is_array($__decoded) && !empty($__decoded)) {
+            $result['extra'] = array_values(array_map('intval', $__decoded));
+        }
+    }
+
+    // 6. Fall back to legacy extra_ball_numbers CSV
+    if (empty($result['extra'])) {
+        $__raw = is_object($row) ? (string)($row->extra_ball_numbers ?? '') : (string)($row['extra_ball_numbers'] ?? '');
+        if ($__raw !== '') {
+            $__arr = json_decode($__raw, true);
+            if (is_array($__arr) && !empty($__arr)) {
+                $result['extra'] = array_values(array_map('intval', $__arr));
+            } else {
+                $__parts = explode(',', $__raw);
+                foreach ($__parts as $__p) {
+                    $__p = trim((string)$__p, ' "\'');
+                    if ($__p !== '') { $result['extra'][] = (int)$__p; }
+                }
+            }
+        }
+    }
+
+    $result['main_count']  = count($result['main']);
+    $result['extra_count'] = count($result['extra']);
+    return $result;
+}
+
 function mylottoexpertExtractDailySavedView($row)
 {
     $result = array(
@@ -5742,7 +5832,8 @@ $__snNewCols = array(
     'prediction_extra_display_count', 'regular_main_numbers_json', 'regular_extra_numbers_json',
     'daily_pick_size', 'daily_primary_prediction', 'daily_primary_prediction_json',
     'daily_top_picks_json', 'daily_top_pick_strings_json', 'daily_bonus_digits_json',
-    'daily_influential_digits_json', 'daily_display_payload_json', 'renderer_hint'
+    'daily_influential_digits_json', 'daily_display_payload_json', 'daily_learning_payload_json',
+    'renderer_hint', 'display_variant', 'canonical_display_string'
 );
 $__snSelectNew = array();
 foreach ($__snNewCols as $__snc) {
@@ -9948,19 +10039,10 @@ $methodKeys = ['skip_hit','ai_prediction','mcmc_prediction','skai_prediction','h
               <?php endif; ?>
 
               <?php
-                $predMain = array_slice(
-                  array_map('intval', explode(',', (string)$s->main_numbers)),
-                  0,
-                  20
-                );
-                $predExtra = array();
-                if (!empty($s->extra_ball_numbers)) {
-                  $predExtra = array_slice(
-                    array_map('intval', explode(',', (string)$s->extra_ball_numbers)),
-                    0,
-                    5
-                  );
-                }
+                // [[SKAI_DISPLAY_SYNC]] Prefer structured display fields; fall back to legacy CSV
+                $__regularView = mylottoexpertExtractRegularSavedView($s);
+                $predMain  = array_slice($__regularView['main'], 0, 20);
+                $predExtra = array_slice($__regularView['extra'], 0, 5);
                 $__dailyView = mylottoexpertExtractDailySavedView($s);
               ?>
 
@@ -9968,8 +10050,9 @@ $methodKeys = ['skip_hit','ai_prediction','mcmc_prediction','skai_prediction','h
                 <?php
                   $__dailyPickSizeLabel = ($__dailyView['pick_size'] > 0) ? (int)$__dailyView['pick_size'] : '';
                   $__dailyCombosLabel   = $__dailyPickSizeLabel !== '' ? ('Top Pick ' . $__dailyPickSizeLabel . ' Combinations') : 'Top Predicted Combinations';
-                  // Use bonus-appended combo strings when available and different from plain strings
-                  $__dailyUseWithBonus  = !empty($__dailyView['combo_strings_with_bonus'])
+                  // Use bonus-appended combo strings when available, non-empty, and different from plain strings
+                  $__dailyUseWithBonus  = !empty($__dailyView['combo_strings'])
+                    && !empty($__dailyView['combo_strings_with_bonus'])
                     && (count($__dailyView['combo_strings_with_bonus']) === count($__dailyView['combo_strings']))
                     && ($__dailyView['combo_strings_with_bonus'] !== $__dailyView['combo_strings']);
                   $__dailyCombosForDisp = $__dailyUseWithBonus ? $__dailyView['combo_strings_with_bonus'] : $__dailyView['combo_strings'];
