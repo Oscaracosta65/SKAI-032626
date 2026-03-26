@@ -13043,7 +13043,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_set']) && !defin
 
         // Picks
         $main  = (array) $in->get('main_numbers', [], 'ARRAY');
-        $extra = (array) $in->get('extra_ball_numbers', [], 'ARRAY');
+        $extra = array();
+        $__extraRawLeg = (string) $in->get('extra_ball_numbers', '', 'RAW');
+        if ($__extraRawLeg !== '') {
+            $__extraDecLeg = json_decode($__extraRawLeg, true);
+            if (is_array($__extraDecLeg)) {
+                $extra = $__extraDecLeg;
+            } else {
+                $extra = array_values(array_filter(preg_split('/\s*,\s*/', $__extraRawLeg), static function($v){ return $v !== ''; }));
+            }
+        }
         $mainRawPosted = (string) $in->get('main_numbers', '', 'RAW');
         if ($mainRawPosted !== '') {
             $mainDecodedPosted = json_decode($mainRawPosted, true);
@@ -49539,11 +49548,10 @@ document.addEventListener('DOMContentLoaded', function () {
     // Also restore SKAI_FINAL_PREDICTION_SETS / __SKAI_FPS_JSON__ so the save
     // payload contains this run's full ranked top-5 set list, not the last run's.
     try {
-      if (r.mainNumbers && r.mainNumbers.length) {
-        window.skaiSaveMainOrdered  = r.mainNumbers.slice();
-        window.skaiSaveExtraOrdered = (r.extraNumbers && r.extraNumbers.length)
-          ? r.extraNumbers.slice(0, (!!(window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame)) ? 3 : 5)) : [];
-      }
+      // Always reset per-combo main/extra to prevent stale carry-over from previous combo
+      window.skaiSaveMainOrdered  = (r.mainNumbers && r.mainNumbers.length) ? r.mainNumbers.slice() : [];
+      window.skaiSaveExtraOrdered = (r.extraNumbers && r.extraNumbers.length)
+        ? r.extraNumbers.slice(0, (!!(window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame)) ? 3 : 5)) : [];
       if (!(window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame))) {
         var _restoreExtra = [];
         if (r.extraNumbers && r.extraNumbers.length) { _restoreExtra = normalizeNumericArray(r.extraNumbers).slice(0, 5); }
@@ -49614,6 +49622,30 @@ document.addEventListener('DOMContentLoaded', function () {
             _bFpsStr = JSON.stringify(_bFpsParsed);
           }
         } catch(_bFpsUpErr) {}
+        // [[SKAI_DISPLAY_SYNC]] Inject daily_combo_strings from captured dailyChosenCombos
+        // so mylottoexpertExtractDailySavedView() can reliably read the top-5 combos.
+        if (r.dailyChosenCombos && r.dailyChosenCombos.length) {
+          try {
+            var _bFpsDcs = (typeof _bFpsStr === 'string' && _bFpsStr !== '') ? JSON.parse(_bFpsStr) : null;
+            if (_bFpsDcs && typeof _bFpsDcs === 'object') {
+              var _bDcStrings = [];
+              for (var _bDci = 0; _bDci < r.dailyChosenCombos.length && _bDci < 5; _bDci++) {
+                var _bDcRow = r.dailyChosenCombos[_bDci] || {};
+                var _bDcDisp = String(_bDcRow.display || _bDcRow.combo_display || '').replace(/[^0-9]/g, '');
+                if (!_bDcDisp && Array.isArray(_bDcRow.combo)) {
+                  _bDcDisp = _bDcRow.combo.join('');
+                }
+                if (_bDcDisp) { _bDcStrings.push(_bDcDisp); }
+              }
+              if (_bDcStrings.length) {
+                _bFpsDcs.daily_combo_strings = _bDcStrings;
+                _bFpsDcs.daily_primary_combo  = _bDcStrings[0];
+                _bFpsDcs.daily_primary_combo_display = _bDcStrings[0];
+                _bFpsStr = JSON.stringify(_bFpsDcs);
+              }
+            }
+          } catch(_bDcsErr) {}
+        }
         window.__SKAI_FPS_JSON__ = _bFpsStr;
         // Write into all top_combos_json hidden fields so skaiPrepareAiSave picks them up
         var _bFpsFlds = document.querySelectorAll('input[name="top_combos_json"]');

@@ -5498,6 +5498,48 @@ function mylottoexpertExtractDailySavedView($row)
                 $result['is_daily'] = true;
             }
         }
+
+        // [[SKAI_DISPLAY_SYNC]] Fallback: read daily_chosen_combos (SKAI primary save path)
+        if (empty($result['combo_strings']) && !empty($decoded['daily_chosen_combos']) && is_array($decoded['daily_chosen_combos'])) {
+            foreach ($decoded['daily_chosen_combos'] as $__dcc) {
+                if (!is_array($__dcc)) { continue; }
+                $__dccStr = '';
+                if (!empty($__dcc['display'])) {
+                    $__dccStr = mylottoexpertNormalizeDigitString($__dcc['display']);
+                } elseif (!empty($__dcc['combo']) && is_array($__dcc['combo'])) {
+                    $__dccStr = implode('', array_map('intval', $__dcc['combo']));
+                } elseif (!empty($__dcc['values'])) {
+                    if (is_array($__dcc['values'])) {
+                        $__dccStr = implode('', array_map('intval', $__dcc['values']));
+                    } else {
+                        $__dccStr = mylottoexpertNormalizeDigitString((string)$__dcc['values']);
+                    }
+                }
+                if ($__dccStr !== '' && !in_array($__dccStr, $result['combo_strings'], true)) {
+                    $result['combo_strings'][] = $__dccStr;
+                }
+            }
+            if (!empty($result['combo_strings'])) { $result['is_daily'] = true; }
+        }
+
+        // [[SKAI_DISPLAY_SYNC]] Fallback: read aiPredictedNumbers (display strings in FPS JSON)
+        if (empty($result['combo_strings']) && !empty($decoded['aiPredictedNumbers']) && is_array($decoded['aiPredictedNumbers'])) {
+            foreach ($decoded['aiPredictedNumbers'] as $__apn) {
+                if (!is_array($__apn)) { continue; }
+                $__apnStr = '';
+                if (!empty($__apn['display'])) {
+                    $__apnStr = mylottoexpertNormalizeDigitString((string)$__apn['display']);
+                } elseif (!empty($__apn['values'])) {
+                    $__apnStr = is_array($__apn['values'])
+                        ? implode('', array_map('intval', $__apn['values']))
+                        : mylottoexpertNormalizeDigitString((string)$__apn['values']);
+                }
+                if ($__apnStr !== '' && !in_array($__apnStr, $result['combo_strings'], true)) {
+                    $result['combo_strings'][] = $__apnStr;
+                }
+            }
+            if (!empty($result['combo_strings'])) { $result['is_daily'] = true; }
+        }
     }
 
     // Fix daily_top_extras: handle both object format [{rank,num,display}] and simple int format
@@ -6141,13 +6183,57 @@ foreach ($groups as $groupKey => $g) {
     $allSourceNumPool = array();
     foreach ($g['preds'] as $s) {
         $src  = (string)$s->source;
-        $nums = array_filter(array_map('intval', explode(',', (string)($s->main_numbers ?? ''))));
+        $__isDailyRow = (
+            (isset($s->prediction_family) && (string)$s->prediction_family === 'daily') ||
+            (isset($s->render_mode) && (string)$s->render_mode === 'daily_combos') ||
+            (!empty($s->daily_primary_prediction))
+        );
+        if ($__isDailyRow) {
+            $nums = array();
+            if (!empty($s->daily_primary_prediction_json)) {
+                $__dpj = json_decode((string)$s->daily_primary_prediction_json, true);
+                if (is_array($__dpj)) { $nums = array_map('intval', $__dpj); }
+            }
+            if (empty($nums) && !empty($s->daily_primary_prediction)) {
+                preg_match_all('/\d/', (string)$s->daily_primary_prediction, $__dm);
+                if (!empty($__dm[0])) { $nums = array_map('intval', $__dm[0]); }
+            }
+            if (empty($nums)) {
+                $__fc = explode(',', (string)($s->main_numbers ?? ''));
+                preg_match_all('/\d/', (string)($__fc[0] ?? ''), $__dm2);
+                if (!empty($__dm2[0])) { $nums = array_map('intval', $__dm2[0]); }
+            }
+        } else {
+            $nums = array_filter(array_map('intval', explode(',', (string)($s->main_numbers ?? ''))));
+        }
         if (!isset($allSourceNumPool[$src])) { $allSourceNumPool[$src] = array(); }
         foreach ($nums as $n) { $allSourceNumPool[$src][$n] = true; }
     }
     foreach ($g['preds'] as $s) {
         $src    = (string)$s->source;
-        $myNums = array_filter(array_map('intval', explode(',', (string)($s->main_numbers ?? ''))));
+        $__isDailyRow2 = (
+            (isset($s->prediction_family) && (string)$s->prediction_family === 'daily') ||
+            (isset($s->render_mode) && (string)$s->render_mode === 'daily_combos') ||
+            (!empty($s->daily_primary_prediction))
+        );
+        if ($__isDailyRow2) {
+            $myNums = array();
+            if (!empty($s->daily_primary_prediction_json)) {
+                $__dpj2 = json_decode((string)$s->daily_primary_prediction_json, true);
+                if (is_array($__dpj2)) { $myNums = array_map('intval', $__dpj2); }
+            }
+            if (empty($myNums) && !empty($s->daily_primary_prediction)) {
+                preg_match_all('/\d/', (string)$s->daily_primary_prediction, $__dm3);
+                if (!empty($__dm3[0])) { $myNums = array_map('intval', $__dm3[0]); }
+            }
+            if (empty($myNums)) {
+                $__fc2 = explode(',', (string)($s->main_numbers ?? ''));
+                preg_match_all('/\d/', (string)($__fc2[0] ?? ''), $__dm4);
+                if (!empty($__dm4[0])) { $myNums = array_map('intval', $__dm4[0]); }
+            }
+        } else {
+            $myNums = array_filter(array_map('intval', explode(',', (string)($s->main_numbers ?? ''))));
+        }
         $otherNums = array();
         $otherSrcList = array();
         foreach ($allSourceNumPool as $otherSrc => $numSet) {
@@ -6181,10 +6267,32 @@ foreach ($groups as $groupKey => $g) {
 
     // -- Hit scoring: compare each prediction to the actual drawn numbers via $drawMap --
     foreach ($g['preds'] as $s) {
-        $predMain = array_values(array_filter(
-            array_map('intval', explode(',', (string)($s->main_numbers ?? ''))),
-            function ($n) { return $n !== 0; }
-        ));
+        $__isDailyPred = (
+            (isset($s->prediction_family) && (string)$s->prediction_family === 'daily') ||
+            (isset($s->render_mode) && (string)$s->render_mode === 'daily_combos') ||
+            (!empty($s->daily_primary_prediction))
+        );
+        if ($__isDailyPred) {
+            $predMain = array();
+            if (!empty($s->daily_primary_prediction_json)) {
+                $__dpj3 = json_decode((string)$s->daily_primary_prediction_json, true);
+                if (is_array($__dpj3)) { $predMain = array_values(array_map('intval', $__dpj3)); }
+            }
+            if (empty($predMain) && !empty($s->daily_primary_prediction)) {
+                preg_match_all('/\d/', (string)$s->daily_primary_prediction, $__dm5);
+                if (!empty($__dm5[0])) { $predMain = array_map('intval', $__dm5[0]); }
+            }
+            if (empty($predMain)) {
+                $__fc3 = explode(',', (string)($s->main_numbers ?? ''));
+                preg_match_all('/\d/', (string)($__fc3[0] ?? ''), $__dm6);
+                if (!empty($__dm6[0])) { $predMain = array_map('intval', $__dm6[0]); }
+            }
+        } else {
+            $predMain = array_values(array_filter(
+                array_map('intval', explode(',', (string)($s->main_numbers ?? ''))),
+                function ($n) { return $n !== 0; }
+            ));
+        }
         $predExtra = 0;
         if (isset($s->extra_ball_numbers) && $s->extra_ball_numbers !== '' && $s->extra_ball_numbers !== null) {
             $tmp = array_values(array_filter(array_map('intval', explode(',', (string)$s->extra_ball_numbers))));
