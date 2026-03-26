@@ -9342,8 +9342,12 @@ if ($isDailyGamePosted) {
     }
 
     // Bonus digits (JSON array of ints)
+    // [[SKAI_DISPLAY_SYNC]] Read daily_bonus_digits first; fall back to daily_extra_digits
+    // (the key written by skaiPrepareAiSave and the batch-save injection) before $extraArr.
     if (is_array($evidenceDecoded) && !empty($evidenceDecoded['daily_bonus_digits']) && is_array($evidenceDecoded['daily_bonus_digits'])) {
         $__dailyBonusDigRow = json_encode(array_values(array_map('intval', $evidenceDecoded['daily_bonus_digits'])), JSON_UNESCAPED_SLASHES);
+    } elseif (is_array($evidenceDecoded) && !empty($evidenceDecoded['daily_extra_digits']) && is_array($evidenceDecoded['daily_extra_digits'])) {
+        $__dailyBonusDigRow = json_encode(array_values(array_map('intval', $evidenceDecoded['daily_extra_digits'])), JSON_UNESCAPED_SLASHES);
     } elseif (!empty($extraArr)) {
         $__dailyBonusDigRow = json_encode(array_values(array_map('intval', $extraArr)), JSON_UNESCAPED_SLASHES);
     }
@@ -49641,6 +49645,25 @@ document.addEventListener('DOMContentLoaded', function () {
                 _bFpsDcs.daily_combo_strings = _bDcStrings;
                 _bFpsDcs.daily_primary_combo  = _bDcStrings[0];
                 _bFpsDcs.daily_primary_combo_display = _bDcStrings[0];
+                // [[SKAI_DISPLAY_SYNC]] Inject ranked digits from unique digits across all combo
+                // arrays so PHP daily_influential_digits_json is populated for batch daily saves.
+                if (!_bFpsDcs.daily_ranked_digits || !_bFpsDcs.daily_ranked_digits.length) {
+                  var _bRanked = [];
+                  var _bSeen = {};
+                  for (var _bRi = 0; _bRi < r.dailyChosenCombos.length && _bRi < 5; _bRi++) {
+                    var _bCombo = (r.dailyChosenCombos[_bRi] && Array.isArray(r.dailyChosenCombos[_bRi].combo)) ? r.dailyChosenCombos[_bRi].combo : [];
+                    for (var _bCj = 0; _bCj < _bCombo.length; _bCj++) {
+                      var _bD = parseInt(_bCombo[_bCj], 10);
+                      if (isFinite(_bD) && !_bSeen[_bD]) { _bSeen[_bD] = true; _bRanked.push(_bD); }
+                    }
+                  }
+                  if (_bRanked.length) { _bFpsDcs.daily_ranked_digits = _bRanked; }
+                }
+                // [[SKAI_DISPLAY_SYNC]] Inject bonus digits so daily_bonus_digits key exists in
+                // top_combos_json — PHP reads this before the daily_extra_digits fallback.
+                if (r.dailyExtraDigits && r.dailyExtraDigits.length) {
+                  _bFpsDcs.daily_bonus_digits = r.dailyExtraDigits.slice(0, 3);
+                }
                 _bFpsStr = JSON.stringify(_bFpsDcs);
               }
             }
