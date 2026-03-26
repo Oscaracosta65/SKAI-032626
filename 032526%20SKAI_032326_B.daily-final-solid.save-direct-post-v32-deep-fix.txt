@@ -8726,9 +8726,12 @@ $labelInput = implode(' - ', $parts);
         if ($isDailyGamePosted && !empty($dailyDisplaySet)) {
             $mainArr = array_values($dailyDisplaySet);
         } else {
-            $mainArr  = $norm($mainArr,  $isDaily, $isDailyGamePosted);
+            // FIX: use $isDailyGamePosted as a second gate for allowZero so that daily
+            // games whose config uses non-standard key names (and therefore $isDaily=false)
+            // still preserve digit 0 in main and extra arrays.
+            $mainArr  = $norm($mainArr,  $isDaily || $isDailyGamePosted, $isDailyGamePosted);
         }
-        $extraArr = $norm($extraArr, $isDaily, $isDailyGamePosted);
+        $extraArr = $norm($extraArr, $isDaily || $isDailyGamePosted, $isDailyGamePosted);
 
         // --- Strict validation against config (size, range, uniqueness) ---
         $pickSize = (int) ($lotteryConfig['lotteryConfig']['pickSize'] ?? $lotteryConfig['pickSize'] ?? 0);
@@ -8744,9 +8747,9 @@ $labelInput = implode(' - ', $parts);
         $sourceNorm = preg_replace('/[^a-z0-9_\-]/i', '', $sourceRaw) ?: 'skip_hit';
         $isSkaiPool = in_array($sourceNorm, ['skai_prediction', 'skai_ai'], true);
 
-        // Clamp mins
-        if ($mainMin <= 0) $mainMin = $isDaily ? 0 : 1;
-        if ($extraMin <= 0) $extraMin = $isDaily ? 0 : 1;
+        // Clamp mins: daily games (by config OR by posted flag) allow digit 0.
+        if ($mainMin <= 0) $mainMin = ($isDaily || $isDailyGamePosted) ? 0 : 1;
+        if ($extraMin <= 0) $extraMin = ($isDaily || $isDailyGamePosted) ? 0 : 1;
 
         // Range filter (drop anything out of range)
         if ($isDailyGamePosted && !empty($dailyDisplaySet)) {
@@ -38701,7 +38704,11 @@ try {
             var _metaFC = window.SKAI_META || {};
             var _pickFC = parseInt(_metaFC.pick, 10);
             if (!_pickFC || _pickFC < 1) { _pickFC = (lastPicks && lastPicks.length) ? lastPicks.length : 5; }
-            var _extraCountFC = (_metaFC && _metaFC.hasExtraBall) ? (parseInt(_metaFC.extraCount || _metaFC.extra_ball_count || _metaFC.num_extra_balls_drawn || 1, 10) || 1) : 0;
+            // FIX: Always predict at least 5 extra numbers for regular lotteries with an extra
+            // ball (e.g. EuroMillions Lucky Stars, Powerball). The official draw count is the
+            // minimum required per official rules, but SKAI shows the top-5 most probable picks
+            // regardless of how many are officially drawn.
+            var _extraCountFC = (_metaFC && _metaFC.hasExtraBall) ? Math.max(5, parseInt(_metaFC.extraCount || _metaFC.extra_ball_count || _metaFC.num_extra_balls_drawn || 1, 10) || 1) : 0;
             window.SKAI_buildFinalCombos({ pickSize: _pickFC, extraCount: _extraCountFC, topK: 12, limit: 25 });
           }
           if (window.SKAI_FINAL_COMBOS && window.SKAI_FINAL_COMBOS.length) {
@@ -42583,8 +42590,12 @@ window.addEventListener('skai:render:done', function(){
     // If meta is missing, infer from common daily rule: presence of digits 0-9 in top list
     var top = (window.SKAI_TOP_MAIN && window.SKAI_TOP_MAIN.length) ? window.SKAI_TOP_MAIN : [];
 
-    // Gate: daily only - use meta.isDaily flag from config (consistent with rendering logic)
-    var isDaily = !!(meta && meta.isDaily);
+    // Gate: daily only - check both isDaily (JSON config flag) and isDailyDigitGame
+    // (computed from mainMax<=9 + no extra ball).  A Pick 3/4/5 game may have
+    // isDailyDigitGame=true even when the JSON config omits the "is_daily" key, so
+    // checking only meta.isDaily would skip the panel and leave SKAI_DAILY_CHOSEN_COMBOS
+    // empty, causing the batch save to store only the primary combo instead of all 5.
+    var isDaily = !!(meta && (meta.isDaily || meta.isDailyDigitGame));
 
     var panel = document.getElementById('skai-daily-panel');
     if (!panel) return;
