@@ -7533,7 +7533,7 @@ foreach ($bestOpps as $__sopp) {
         <?php echo \Joomla\CMS\HTML\HTMLHelper::_('form.token'); ?>
         <input type="hidden" name="delete_set_selected" id="prc-del-val-<?php echo $__prcSectionId; ?>" value="">
         <button type="submit" class="btn-danger" style="font-size:0.8rem; padding:0.3rem 0.9rem;">&#x1F5D1; Delete Selected</button>
-        <button type="button" class="btn-secondary" style="font-size:0.8rem; padding:0.3rem 0.9rem;" data-prc-select-upcoming-btn="1" data-prc-section-id="<?php echo $__prcSectionId; ?>">Select Upcoming</button>
+        <button type="button" class="btn-secondary" style="font-size:0.8rem; padding:0.3rem 0.9rem;" data-prc-select-upcoming-btn="1" data-prc-section-id="<?php echo $__prcSectionId; ?>" aria-label="Select all upcoming predictions that have not yet been scored">Select Upcoming</button>
         <button type="button" class="btn-secondary" style="font-size:0.8rem; padding:0.3rem 0.9rem;" data-prc-clear-btn="1" data-prc-section-id="<?php echo $__prcSectionId; ?>">Clear selection</button>
         <span class="prc-del-hint">Tick one or more checkboxes, then click "Delete Selected" to remove them. Change your mind? Click "Clear Selection".</span>
       </form>
