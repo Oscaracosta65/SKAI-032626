@@ -5354,7 +5354,10 @@ function mylottoexpertExtractDailySavedView($row)
         $mainDigits = mylottoexpertParseSimpleNumberCsv($mainRaw);
         if (!empty($mainDigits) && count($mainDigits) >= 2 && count($mainDigits) <= 5) {
             $result['ranked_digits'] = $mainDigits;
-            if (!empty($result['combo_strings']) || !empty($result['primary_combo_digits']) || !empty($result['extra_digits'])) {
+            // NOTE: extra_digits alone is NOT sufficient — regular lotteries (e.g. EuroMillions)
+            // also have extra_ball_numbers. Only combo_strings or primary_combo_digits confirm
+            // that this is a daily-game prediction layout.
+            if (!empty($result['combo_strings']) || !empty($result['primary_combo_digits'])) {
                 $result['is_daily'] = true;
             }
         }
