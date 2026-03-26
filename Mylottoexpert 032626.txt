@@ -5733,7 +5733,7 @@ $__snCols = array();
 try {
     $__snColsRaw = $db->getTableColumns('#__user_saved_numbers', false);
     $__snCols = is_array($__snColsRaw) ? array_keys($__snColsRaw) : array();
-} catch (\Throwable $__) { $__snCols = array(); }
+} catch (\Throwable $_e) { $__snCols = array(); }
 
 $__snNewCols = array(
     'save_schema_version', 'prediction_family', 'prediction_type', 'render_mode',
