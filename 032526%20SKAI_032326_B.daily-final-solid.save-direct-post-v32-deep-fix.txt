@@ -49798,7 +49798,15 @@ document.addEventListener('DOMContentLoaded', function () {
         _bfExtraArr = (r.extraNumbers && r.extraNumbers.length) ? r.extraNumbers.slice(0, 5) : [];
       }
       var _bfNumJsonStr = '';
-      try { _bfNumJsonStr = JSON.stringify({ main_numbers: _bfMainArr, extra_numbers: _bfExtraArr }); } catch(_) {}
+      try {
+        var _bfNjPayload = { main_numbers: _bfMainArr, extra_numbers: _bfExtraArr };
+        // FIX: For daily games also include daily_top_combo_strings so PHP skips intval()
+        // coercion of combo display strings (which destroys leading zeros like '056' → 56).
+        // PHP reads daily_top_combo_strings first (line ~8654) before falling back to
+        // main_numbers; including it here ensures the safe string path is always used.
+        if (_bfIsDaily && _bfMainArr.length) { _bfNjPayload.daily_top_combo_strings = _bfMainArr.slice(); }
+        _bfNumJsonStr = JSON.stringify(_bfNjPayload);
+      } catch(_) {}
       if (_bfNumJson  && _bfNumJsonStr)       { _bfNumJson.value   = _bfNumJsonStr; }
       if (_bfMainJson && _bfMainArr.length)   { _bfMainJson.value  = JSON.stringify(_bfMainArr); }
       if (_bfExtraJson) { _bfExtraJson.value = _bfExtraArr.length ? JSON.stringify(_bfExtraArr) : ''; }

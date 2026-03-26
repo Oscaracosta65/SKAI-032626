@@ -5485,7 +5485,9 @@ function mylottoexpertExtractDailySavedView($row)
                     $comboString = mylottoexpertNormalizeDigitString($comboRow['display']);
                 } elseif (!empty($comboRow['values'])) {
                     if (is_array($comboRow['values'])) {
-                        $comboString = implode('', array_map('intval', $comboRow['values']));
+                        // FIX: Use strval() not intval() — strval preserves each digit as-is
+                        // (intval('06') → 6, destroying leading zeros; strval('06') → '06').
+                        $comboString = implode('', array_map('strval', $comboRow['values']));
                     } else {
                         $comboString = mylottoexpertNormalizeDigitString($comboRow['values']);
                     }
@@ -5507,10 +5509,12 @@ function mylottoexpertExtractDailySavedView($row)
                 if (!empty($__dcc['display'])) {
                     $__dccStr = mylottoexpertNormalizeDigitString($__dcc['display']);
                 } elseif (!empty($__dcc['combo']) && is_array($__dcc['combo'])) {
-                    $__dccStr = implode('', array_map('intval', $__dcc['combo']));
+                    // FIX: Use strval() not intval() — preserves digit '0' correctly.
+                    $__dccStr = implode('', array_map('strval', $__dcc['combo']));
                 } elseif (!empty($__dcc['values'])) {
                     if (is_array($__dcc['values'])) {
-                        $__dccStr = implode('', array_map('intval', $__dcc['values']));
+                        // FIX: Use strval() not intval() — preserves digit '0' correctly.
+                        $__dccStr = implode('', array_map('strval', $__dcc['values']));
                     } else {
                         $__dccStr = mylottoexpertNormalizeDigitString((string)$__dcc['values']);
                     }
@@ -5531,7 +5535,8 @@ function mylottoexpertExtractDailySavedView($row)
                     $__apnStr = mylottoexpertNormalizeDigitString((string)$__apn['display']);
                 } elseif (!empty($__apn['values'])) {
                     $__apnStr = is_array($__apn['values'])
-                        ? implode('', array_map('intval', $__apn['values']))
+                        // FIX: Use strval() not intval() — preserves digit '0' correctly.
+                        ? implode('', array_map('strval', $__apn['values']))
                         : mylottoexpertNormalizeDigitString((string)$__apn['values']);
                 }
                 if ($__apnStr !== '' && !in_array($__apnStr, $result['combo_strings'], true)) {
