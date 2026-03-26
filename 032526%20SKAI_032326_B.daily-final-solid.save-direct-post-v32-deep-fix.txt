@@ -49326,6 +49326,11 @@ document.addEventListener('DOMContentLoaded', function () {
                             mainNumbers: res.mainNumbers || [], extraNumbers: res.extraNumbers || [],
                             finalPredictionSets: res.finalPredictionSets || [],
                             fpsJson: res.fpsJson || '', dailyChosenCombos: res.dailyChosenCombos || [],
+                            // FIX: store dailyExtraDigits and dailyTopExtras so saveAllSequential()
+                            // can restore the per-run bonus digits for daily lottery batch saves.
+                            // Without these, r.dailyExtraDigits is undefined during restore and
+                            // SKAI_DAILY_EXTRA_DIGITS is cleared to [] → bonus digits are lost.
+                            dailyExtraDigits: res.dailyExtraDigits || [], dailyTopExtras: res.dailyTopExtras || [],
                             blendAiPct: (typeof res.blendAiPct === 'number') ? res.blendAiPct : null,
                             blendSkipPct: null,
                             blendLabel: res.blendLabel || '',
@@ -49758,6 +49763,48 @@ document.addEventListener('DOMContentLoaded', function () {
 
     var ev = document.createEvent("Event");
     ev.initEvent("submit", true, true);
+    // FIX: Explicitly sync prediction-number form fields with this run's data before
+    // submitting.  The skai:done event listener (which normally populates numbers_json,
+    // extra_ball_numbers etc.) fires during each batch RUN, not during batch SAVE.  By
+    // the time saveAllSequential() saves run 0, the form fields contain the LAST run's
+    // data (stale), so every DB row ends up with the same numbers.  Setting the fields
+    // here — just before dispatchEvent — ensures each save carries its own payload.
+    try {
+      var _bfNumJson   = document.getElementById('skai-ai-numbers-json');
+      var _bfMainJson  = document.getElementById('skai-ai-main-json');
+      var _bfExtraJson = document.getElementById('skai-ai-extra-json');
+      var _bfMainCsv   = document.getElementById('skai-ai-main-csv');
+      var _bfExtraCsv  = document.getElementById('skai-ai-extra-csv');
+      var _bfIsDaily   = !!(window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame));
+      var _bfMainArr   = [];
+      var _bfExtraArr  = [];
+      if (_bfIsDaily) {
+        // Daily: main = combo display strings (top 5), extra = bonus digits (top 3)
+        if (r.dailyChosenCombos && r.dailyChosenCombos.length) {
+          for (var _bfdc = 0; _bfdc < r.dailyChosenCombos.length && _bfMainArr.length < 5; _bfdc++) {
+            var _bfDcRow = r.dailyChosenCombos[_bfdc] || {};
+            var _bfDcDisp = String(_bfDcRow.display || '').replace(/[^0-9]/g, '');
+            if (!_bfDcDisp && Array.isArray(_bfDcRow.combo)) { _bfDcDisp = _bfDcRow.combo.join(''); }
+            if (_bfDcDisp) { _bfMainArr.push(_bfDcDisp); }
+          }
+        }
+        if (!_bfMainArr.length && r.mainNumbers && r.mainNumbers.length) {
+          _bfMainArr = r.mainNumbers.slice();
+        }
+        _bfExtraArr = (r.dailyExtraDigits && r.dailyExtraDigits.length) ? r.dailyExtraDigits.slice(0, 3) : [];
+      } else {
+        // Regular lottery: main = top-N main numbers, extra = top-5 extra numbers
+        _bfMainArr  = (r.mainNumbers  && r.mainNumbers.length)  ? r.mainNumbers.slice()      : [];
+        _bfExtraArr = (r.extraNumbers && r.extraNumbers.length) ? r.extraNumbers.slice(0, 5) : [];
+      }
+      var _bfNumJsonStr = '';
+      try { _bfNumJsonStr = JSON.stringify({ main_numbers: _bfMainArr, extra_numbers: _bfExtraArr }); } catch(_) {}
+      if (_bfNumJson  && _bfNumJsonStr)       { _bfNumJson.value   = _bfNumJsonStr; }
+      if (_bfMainJson && _bfMainArr.length)   { _bfMainJson.value  = JSON.stringify(_bfMainArr); }
+      if (_bfExtraJson) { _bfExtraJson.value = _bfExtraArr.length ? JSON.stringify(_bfExtraArr) : ''; }
+      if (_bfMainCsv)  { _bfMainCsv.value   = _bfMainArr.join(','); }
+      if (_bfExtraCsv) { _bfExtraCsv.value  = _bfExtraArr.join(','); }
+    } catch (_bPredFldErr) {}
     form.dispatchEvent(ev);
 
     setTimeout(function () {
