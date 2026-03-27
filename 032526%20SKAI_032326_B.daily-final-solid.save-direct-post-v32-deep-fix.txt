@@ -39516,7 +39516,9 @@ if (isDailyGame) {
 }
 
 // Extra balls: only render if the game actually has an extra ball
-var topX = (hasExtra ? topXAll.slice(0, isDailyGame ? 3 : 5) : []);
+// FIX: When hasExtra=true (real extra-ball game like Powerball/EuroMillions), always show
+// up to 5 predictions regardless of isDailyGame flag (which may be wrongly set for some games).
+var topX = (hasExtra ? topXAll.slice(0, 5) : []);
 
 syncTopLimitControls(limit);
 
@@ -48672,7 +48674,8 @@ document.addEventListener('DOMContentLoaded', function () {
       // before the user clicks Save, so interceptSaveForm can serialize them correctly
       // even if skaiPrepareAiSave is blocked by an early guard during submit.
       try {
-        var _sdIsDaily = !!(window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame));
+        var _sdIsDaily = !!(window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame)
+          && !window.SKAI_META.hasExtraBall);
         var _sdExtraLimit = _sdIsDaily ? 3 : ((window.SKAI_TOP_EXTRA && window.SKAI_TOP_EXTRA.length) ? Math.min(5, window.SKAI_TOP_EXTRA.length) : 5);
         var _sdMainArr = [];
         if (_sdIsDaily && window.SKAI_DAILY_CHOSEN_COMBOS && window.SKAI_DAILY_CHOSEN_COMBOS.length) {
@@ -49046,7 +49049,8 @@ document.addEventListener('DOMContentLoaded', function () {
         }
       } catch(_) {}
       var extraNums = [];
-      if (window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame)) {
+      if (window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame)
+          && !window.SKAI_META.hasExtraBall) {
         extraNums = (window.skaiSaveExtraOrdered && window.skaiSaveExtraOrdered.length)
           ? window.skaiSaveExtraOrdered.slice(0, 3) : [];
       } else {
