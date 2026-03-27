@@ -38540,24 +38540,13 @@ try {
     }
     if (window.SKAI_lastScoreByNum) window.SKAI_lastScoreByNum[String(num)] = score;
 
-    // FIX: Apply diversity noise to main ball scores so different profile/strategy combos
-    // produce different top picks even for large-domain games (Powerball 69 balls, EuroMillions
-    // 50 balls) where blend/temperature changes alone are insufficient to reshuffle the top-5
-    // from a strongly concentrated ML probability distribution.  The same mechanism already
-    // exists in adjustProbExtra() for extra-ball training; this mirrors it for main balls.
-    var _diversityMain = (settings && settings.diversityPenalty != null && isFinite(+settings.diversityPenalty))
-      ? +settings.diversityPenalty : 0.02;
-    if (_diversityMain > 0) {
-      var _mainNoise;
-      if (window.SKAI_DETERMINISTIC && window.SKAI_DETERMINISTIC.enabled) {
-        // Reproducibility mode: use deterministic epsilon tie-breaker instead of random noise
-        _mainNoise = 1e-8 * (window.SKAI_DETERMINISTIC.tieBreaker ? window.SKAI_DETERMINISTIC.tieBreaker(num) : 0);
-      } else {
-        _mainNoise = (Math.random() - 0.5) * 2 * _diversityMain;
-      }
-      score += _mainNoise;
-      if (score < 0) score = 0;
-    }
+    // DETERMINISTIC: Main-ball scores are kept noise-free so the same model state and
+    // settings always produce the same SKAI_TOP_MAIN ranking (reproducible learning).
+    // Within-run FPS diversity (5 structurally different combo suggestions per run) is
+    // handled deterministically by the FPS selection loop in SKAI_scoreAndRender, which
+    // enforces ≥2 ball difference between each FPS entry without any Math.random().
+    // Cross-run diversity (different batch profile/strategy combos) comes from genuinely
+    // different neural-network weights, blend, temperature, and TS factor — not from noise.
 
     blended.push({
       num: num,
