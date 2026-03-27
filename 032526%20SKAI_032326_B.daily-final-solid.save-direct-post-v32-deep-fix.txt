@@ -38732,21 +38732,77 @@ try {
             // minimum required per official rules, but SKAI shows the top-5 most probable picks
             // regardless of how many are officially drawn.
             var _extraCountFC = (_metaFC && _metaFC.hasExtraBall) ? Math.max(5, parseInt(_metaFC.extraCount || _metaFC.extra_ball_count || _metaFC.num_extra_balls_drawn || 1, 10) || 1) : 0;
-            window.SKAI_buildFinalCombos({ pickSize: _pickFC, extraCount: _extraCountFC, topK: 12, limit: 25 });
+            // FIX-D: topK 12→20 — use all 20 balls from SKAI_TOP_MAIN (C(20,5)=15504
+            // candidates vs C(12,5)=792).  For large-domain games (Powerball 69, EuroMillions
+            // 50) the extra pool breadth is needed so diversity enforcement below can find
+            // genuinely different combos; for small-domain games it is harmless.
+            // FIX-E: limit 25→100 — keep top 100 ranked combos available so the
+            // diversity-aware FPS selection (Fix F below) has enough candidates to choose
+            // 5 entries that each differ by ≥2 balls.  With limit=25, the first combo
+            // differing by ≥2 balls from FPS[0] is often beyond position 37 (because
+            // 36 combos share ≥4 balls with the top pick) and was never reachable.
+            window.SKAI_buildFinalCombos({ pickSize: _pickFC, extraCount: _extraCountFC, topK: 20, limit: 100 });
           }
           if (window.SKAI_FINAL_COMBOS && window.SKAI_FINAL_COMBOS.length) {
             window.SKAI_BEST_COMBO = window.SKAI_FINAL_COMBOS[0] || null;
+            // FIX-F: Diversity-aware FPS selection.
+            // Problem: With limit=25 and no diversity check, the top 5 combos
+            // from C(12,5)=792 all share the same 4 highest-scoring balls and
+            // only vary in 1 position.  For large-domain games (Powerball 69,
+            // EuroMillions 50) the ML distribution is nearly flat so those 4 balls
+            // dominate ALL 25 candidates.  Users see "same numbers" in all 5 slots.
+            //
+            // Fix: First pass selects combos that differ by ≥2 balls from every
+            // already-selected FPS entry (max shared = pickSize-2).  Second pass
+            // fills any remaining slots without the constraint so we always emit 5.
+            var _fpsDivPickSize = _pickFC || 5;
+            var _fpsDivMaxShared = Math.max(1, _fpsDivPickSize - 2); // ≥2 ball difference
+            var _fpsPass2Needed = false;
             for (var _fj = 0; _fj < window.SKAI_FINAL_COMBOS.length && _fps.length < 5; _fj++) {
               var _fc = window.SKAI_FINAL_COMBOS[_fj];
-              if (_fc && Array.isArray(_fc.main) && _fc.main.length > 0) {
-                _fps.push({
-                  rank:  _fps.length + 1,
-                  main:  _fc.main.slice(),
-                  extra: (_fc.extra && Array.isArray(_fc.extra)) ? _fc.extra.slice() : [],
-                  score: (typeof _fc.score === 'number') ? _fc.score : 0,
-                  approxPct: 0,
-                  source: 'final_combos'
-                });
+              if (!_fc || !Array.isArray(_fc.main) || !_fc.main.length) { continue; }
+              var _fcMain = _fc.main;
+              var _tooSimilar = false;
+              for (var _prevFps = 0; _prevFps < _fps.length; _prevFps++) {
+                var _prevMain = _fps[_prevFps].main;
+                var _sharedCount = 0;
+                for (var _bk = 0; _bk < _fcMain.length; _bk++) {
+                  for (var _pk = 0; _pk < _prevMain.length; _pk++) {
+                    if (_fcMain[_bk] === _prevMain[_pk]) { _sharedCount++; break; }
+                  }
+                }
+                if (_sharedCount > _fpsDivMaxShared) { _tooSimilar = true; break; }
+              }
+              if (_tooSimilar) { _fpsPass2Needed = true; continue; }
+              _fps.push({
+                rank:  _fps.length + 1,
+                main:  _fcMain.slice(),
+                extra: (_fc.extra && Array.isArray(_fc.extra)) ? _fc.extra.slice() : [],
+                score: (typeof _fc.score === 'number') ? _fc.score : 0,
+                approxPct: 0,
+                source: 'final_combos'
+              });
+            }
+            // Second pass: fill remaining slots without diversity constraint so we
+            // always emit exactly 5 FPS entries even if the pool is too concentrated.
+            if (_fpsPass2Needed && _fps.length < 5) {
+              for (var _fj2 = 0; _fj2 < window.SKAI_FINAL_COMBOS.length && _fps.length < 5; _fj2++) {
+                var _fc2 = window.SKAI_FINAL_COMBOS[_fj2];
+                if (!_fc2 || !Array.isArray(_fc2.main) || !_fc2.main.length) { continue; }
+                var _alreadyInFps = false;
+                for (var _exi = 0; _exi < _fps.length; _exi++) {
+                  if (_fps[_exi].main.join(',') === _fc2.main.join(',')) { _alreadyInFps = true; break; }
+                }
+                if (!_alreadyInFps) {
+                  _fps.push({
+                    rank:  _fps.length + 1,
+                    main:  _fc2.main.slice(),
+                    extra: (_fc2.extra && Array.isArray(_fc2.extra)) ? _fc2.extra.slice() : [],
+                    score: (typeof _fc2.score === 'number') ? _fc2.score : 0,
+                    approxPct: 0,
+                    source: 'final_combos'
+                  });
+                }
               }
             }
           }
