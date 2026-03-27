@@ -5259,17 +5259,200 @@ function mylottoexpertDigitStringToArray($value)
     return array_map('intval', str_split($digits));
 }
 
+/**
+ * Format a single lottery digit (0-9) with a leading zero for display (e.g., 3 → '03').
+ * Values >= 10 are returned as plain string. Non-digit values are cast to int first.
+ */
+function mylottoexpertFormatBonusDigit($n)
+{
+    $n = (int)$n;
+    return ($n >= 0 && $n <= 9) ? ('0' . $n) : (string)$n;
+}
+
+/**
+ * [[SKAI_DISPLAY_SYNC]] Extract regular-lottery display numbers from structured columns.
+ * Prefers new structured JSON fields; falls back to legacy CSV fields.
+ * Returns ['main' => int[], 'extra' => int[], 'main_count' => int, 'extra_count' => int]
+ */
+function mylottoexpertExtractRegularSavedView($row)
+{
+    $result = array(
+        'main'        => array(),
+        'extra'       => array(),
+        'main_count'  => 0,
+        'extra_count' => 0,
+        'used_structured' => false
+    );
+
+    // 1. Prefer regular_main_numbers_json (most explicit structured source)
+    if (is_object($row) && !empty($row->regular_main_numbers_json)) {
+        $__decoded = json_decode((string)$row->regular_main_numbers_json, true);
+        if (is_array($__decoded) && !empty($__decoded)) {
+            $result['main'] = array_values(array_map('intval', $__decoded));
+            $result['used_structured'] = true;
+        }
+    }
+
+    // 2. Prefer main_display_json as second choice
+    if (empty($result['main']) && is_object($row) && !empty($row->main_display_json)) {
+        $__decoded = json_decode((string)$row->main_display_json, true);
+        if (is_array($__decoded) && !empty($__decoded)) {
+            $result['main'] = array_values(array_map('intval', $__decoded));
+            $result['used_structured'] = true;
+        }
+    }
+
+    // 3. Fall back to legacy main_numbers CSV
+    if (empty($result['main'])) {
+        $__raw = is_object($row) ? (string)($row->main_numbers ?? '') : (string)($row['main_numbers'] ?? '');
+        if ($__raw !== '') {
+            $__raw = ltrim($__raw, '['); // strip JSON array chars if stored as JSON
+            $__raw = rtrim($__raw, ']');
+            $__arr = json_decode('[' . $__raw . ']', true);
+            if (is_array($__arr) && !empty($__arr)) {
+                $result['main'] = array_values(array_map('intval', $__arr));
+            } else {
+                $__parts = explode(',', $__raw);
+                foreach ($__parts as $__p) {
+                    $__p = trim((string)$__p, ' "\'');
+                    if ($__p !== '') { $result['main'][] = (int)$__p; }
+                }
+            }
+        }
+    }
+
+    // 4. Prefer regular_extra_numbers_json
+    if (is_object($row) && !empty($row->regular_extra_numbers_json)) {
+        $__decoded = json_decode((string)$row->regular_extra_numbers_json, true);
+        if (is_array($__decoded) && !empty($__decoded)) {
+            $result['extra'] = array_values(array_map('intval', $__decoded));
+        }
+    }
+
+    // 5. Prefer extra_display_json as second choice
+    if (empty($result['extra']) && is_object($row) && !empty($row->extra_display_json)) {
+        $__decoded = json_decode((string)$row->extra_display_json, true);
+        if (is_array($__decoded) && !empty($__decoded)) {
+            $result['extra'] = array_values(array_map('intval', $__decoded));
+        }
+    }
+
+    // 6. Fall back to legacy extra_ball_numbers CSV
+    if (empty($result['extra'])) {
+        $__raw = is_object($row) ? (string)($row->extra_ball_numbers ?? '') : (string)($row['extra_ball_numbers'] ?? '');
+        if ($__raw !== '') {
+            $__arr = json_decode($__raw, true);
+            if (is_array($__arr) && !empty($__arr)) {
+                $result['extra'] = array_values(array_map('intval', $__arr));
+            } else {
+                $__parts = explode(',', $__raw);
+                foreach ($__parts as $__p) {
+                    $__p = trim((string)$__p, ' "\'');
+                    if ($__p !== '') { $result['extra'][] = (int)$__p; }
+                }
+            }
+        }
+    }
+
+    $result['main_count']  = count($result['main']);
+    $result['extra_count'] = count($result['extra']);
+    return $result;
+}
+
 function mylottoexpertExtractDailySavedView($row)
 {
     $result = array(
-        'is_daily' => false,
-        'ranked_digits' => array(),
-        'primary_combo_digits' => array(),
-        'combo_strings' => array(),
-        'extra_digits' => array(),
-        'top_extras' => array()
+        'is_daily'              => false,
+        'pick_size'             => 0,
+        'ranked_digits'         => array(),
+        'primary_combo_digits'  => array(),
+        'combo_strings'         => array(),
+        'combo_strings_with_bonus' => array(),
+        'extra_digits'          => array(),
+        'bonus_digits'          => array(),
+        'bonus_digits_display'  => array(),
+        'top_extras'            => array()
     );
 
+    // [[SKAI_DISPLAY_SYNC]] Early detection: trust structured schema columns written by the
+    // primary save handler. prediction_family='daily' and renderer_hint='daily_combos' are
+    // set for every Pick3/4/5 row saved after the schema upgrade; detecting them here lets
+    // the extractor skip all the JSON-key hunting for those rows and return early once
+    // combo_strings is populated below.
+    if (is_object($row)) {
+        $__pf = isset($row->prediction_family) ? (string)$row->prediction_family : '';
+        $__rh = isset($row->renderer_hint)     ? (string)$row->renderer_hint     : '';
+        $__rm = isset($row->render_mode)       ? (string)$row->render_mode       : '';
+        if ($__pf === 'daily' || $__rh === 'daily_combos' || $__rm === 'daily_combos') {
+            $result['is_daily'] = true;
+        }
+    }
+
+    // --- Prefer new structured columns when available ---
+    $dailyPickSize = 0;
+    if (is_object($row) && isset($row->daily_pick_size) && (int)$row->daily_pick_size > 0) {
+        $dailyPickSize = (int)$row->daily_pick_size;
+    }
+    $result['pick_size'] = $dailyPickSize;
+
+    if (is_object($row) && isset($row->daily_influential_digits_json) && (string)$row->daily_influential_digits_json !== '') {
+        $__inf = json_decode((string)$row->daily_influential_digits_json, true);
+        if (is_array($__inf) && !empty($__inf)) {
+            $result['ranked_digits'] = array_values(array_map('intval', $__inf));
+            $result['is_daily'] = true;
+        }
+    }
+
+    if (is_object($row) && isset($row->daily_top_picks_json) && (string)$row->daily_top_picks_json !== '') {
+        $__tp = json_decode((string)$row->daily_top_picks_json, true);
+        if (is_array($__tp) && !empty($__tp)) {
+            foreach ($__tp as $__tpStr) {
+                $__tpStr = mylottoexpertNormalizeDigitString($__tpStr);
+                if ($__tpStr !== '') {
+                    $result['combo_strings'][] = $__tpStr;
+                }
+            }
+            if (!empty($result['combo_strings'])) { $result['is_daily'] = true; }
+        }
+    }
+
+    if (is_object($row) && isset($row->daily_bonus_digits_json) && (string)$row->daily_bonus_digits_json !== '') {
+        $__bd = json_decode((string)$row->daily_bonus_digits_json, true);
+        if (is_array($__bd) && !empty($__bd)) {
+            $result['bonus_digits'] = array_values(array_map('intval', $__bd));
+            $result['bonus_digits_display'] = array_map('mylottoexpertFormatBonusDigit', $result['bonus_digits']);
+            $result['extra_digits'] = $result['bonus_digits'];
+            $result['is_daily'] = true;
+        }
+    }
+
+    if (is_object($row) && isset($row->daily_primary_prediction) && (string)$row->daily_primary_prediction !== '') {
+        $__pp = mylottoexpertNormalizeDigitString((string)$row->daily_primary_prediction);
+        if ($__pp !== '' && empty($result['primary_combo_digits'])) {
+            $result['primary_combo_digits'] = mylottoexpertDigitStringToArray($__pp);
+            $result['is_daily'] = true;
+        }
+    }
+
+    // Build combo_strings_with_bonus from structured fields when bonus available
+    if (!empty($result['combo_strings']) && !empty($result['bonus_digits_display'])) {
+        $__bonusSuffix = ' + Bonus ' . implode(' ', $result['bonus_digits_display']);
+        foreach ($result['combo_strings'] as $__cs) {
+            $result['combo_strings_with_bonus'][] = $__cs . $__bonusSuffix;
+        }
+    } else {
+        $result['combo_strings_with_bonus'] = $result['combo_strings'];
+    }
+
+    // If structured columns provided complete data, return early
+    if ($result['is_daily'] && !empty($result['combo_strings'])) {
+        if (empty($result['primary_combo_digits']) && !empty($result['combo_strings'])) {
+            $result['primary_combo_digits'] = mylottoexpertDigitStringToArray($result['combo_strings'][0]);
+        }
+        return $result;
+    }
+
+    // --- Legacy: fall back to top_combos_json ---
     $topCombRaw = '';
     if (is_object($row) && isset($row->top_combos_json)) {
         $topCombRaw = (string)$row->top_combos_json;
@@ -5285,63 +5468,152 @@ function mylottoexpertExtractDailySavedView($row)
         }
     }
 
-    if (!empty($decoded['daily_ranked_digits']) && is_array($decoded['daily_ranked_digits'])) {
+    if (!empty($decoded['daily_ranked_digits']) && is_array($decoded['daily_ranked_digits']) && empty($result['ranked_digits'])) {
         $result['ranked_digits'] = array_values(array_map('intval', $decoded['daily_ranked_digits']));
         $result['is_daily'] = true;
     }
 
-    if (!empty($decoded['daily_primary_combo_digits']) && is_array($decoded['daily_primary_combo_digits'])) {
+    if (!empty($decoded['daily_primary_combo_digits']) && is_array($decoded['daily_primary_combo_digits']) && empty($result['primary_combo_digits'])) {
         $result['primary_combo_digits'] = array_values(array_map('intval', $decoded['daily_primary_combo_digits']));
         $result['is_daily'] = true;
     }
 
-    if (!empty($decoded['daily_combo_strings']) && is_array($decoded['daily_combo_strings'])) {
-        foreach ($decoded['daily_combo_strings'] as $comboString) {
-            $comboString = mylottoexpertNormalizeDigitString($comboString);
-            if ($comboString !== '') {
-                $result['combo_strings'][] = $comboString;
-            }
-        }
-        if (!empty($result['combo_strings'])) {
-            $result['is_daily'] = true;
-        }
-    }
-
-    if (!empty($decoded['daily_top_combos']) && is_array($decoded['daily_top_combos'])) {
-        foreach ($decoded['daily_top_combos'] as $comboRow) {
-            if (!is_array($comboRow)) { continue; }
-            $comboString = '';
-            if (!empty($comboRow['display'])) {
-                $comboString = mylottoexpertNormalizeDigitString($comboRow['display']);
-            } elseif (!empty($comboRow['values'])) {
-                if (is_array($comboRow['values'])) {
-                    $comboString = implode('', array_map('intval', $comboRow['values']));
-                } else {
-                    $comboString = mylottoexpertNormalizeDigitString($comboRow['values']);
+    if (empty($result['combo_strings'])) {
+        if (!empty($decoded['daily_combo_strings']) && is_array($decoded['daily_combo_strings'])) {
+            foreach ($decoded['daily_combo_strings'] as $comboString) {
+                $comboString = mylottoexpertNormalizeDigitString($comboString);
+                if ($comboString !== '') {
+                    $result['combo_strings'][] = $comboString;
                 }
             }
-            if ($comboString !== '' && !in_array($comboString, $result['combo_strings'], true)) {
-                $result['combo_strings'][] = $comboString;
+            if (!empty($result['combo_strings'])) {
+                $result['is_daily'] = true;
             }
         }
-        if (!empty($result['combo_strings'])) {
+
+        if (empty($result['combo_strings']) && !empty($decoded['daily_top_combos']) && is_array($decoded['daily_top_combos'])) {
+            foreach ($decoded['daily_top_combos'] as $comboRow) {
+                if (!is_array($comboRow)) { continue; }
+                $comboString = '';
+                if (!empty($comboRow['display'])) {
+                    $comboString = mylottoexpertNormalizeDigitString($comboRow['display']);
+                } elseif (!empty($comboRow['values'])) {
+                    if (is_array($comboRow['values'])) {
+                        // FIX: Use strval() not intval() — strval preserves each digit as-is
+                        // (intval('06') → 6, destroying leading zeros; strval('06') → '06').
+                        $comboString = implode('', array_map('strval', $comboRow['values']));
+                    } else {
+                        $comboString = mylottoexpertNormalizeDigitString($comboRow['values']);
+                    }
+                }
+                if ($comboString !== '' && !in_array($comboString, $result['combo_strings'], true)) {
+                    $result['combo_strings'][] = $comboString;
+                }
+            }
+            if (!empty($result['combo_strings'])) {
+                $result['is_daily'] = true;
+            }
+        }
+
+        // [[SKAI_DISPLAY_SYNC]] Fallback: read daily_chosen_combos (SKAI primary save path)
+        if (empty($result['combo_strings']) && !empty($decoded['daily_chosen_combos']) && is_array($decoded['daily_chosen_combos'])) {
+            foreach ($decoded['daily_chosen_combos'] as $__dcc) {
+                if (!is_array($__dcc)) { continue; }
+                $__dccStr = '';
+                if (!empty($__dcc['display'])) {
+                    $__dccStr = mylottoexpertNormalizeDigitString($__dcc['display']);
+                } elseif (!empty($__dcc['combo']) && is_array($__dcc['combo'])) {
+                    // FIX: Use strval() not intval() — preserves digit '0' correctly.
+                    $__dccStr = implode('', array_map('strval', $__dcc['combo']));
+                } elseif (!empty($__dcc['values'])) {
+                    if (is_array($__dcc['values'])) {
+                        // FIX: Use strval() not intval() — preserves digit '0' correctly.
+                        $__dccStr = implode('', array_map('strval', $__dcc['values']));
+                    } else {
+                        $__dccStr = mylottoexpertNormalizeDigitString((string)$__dcc['values']);
+                    }
+                }
+                if ($__dccStr !== '' && !in_array($__dccStr, $result['combo_strings'], true)) {
+                    $result['combo_strings'][] = $__dccStr;
+                }
+            }
+            if (!empty($result['combo_strings'])) { $result['is_daily'] = true; }
+        }
+
+        // [[SKAI_DISPLAY_SYNC]] Fallback: read aiPredictedNumbers (display strings in FPS JSON)
+        // GUARD: Only treat aiPredictedNumbers as daily combo strings when the FPS JSON
+        // predictionMode is explicitly 'daily_digit' OR is absent (legacy pre-predictionMode
+        // rows saved before this field was added — those are assumed daily when aiPredictedNumbers
+        // is present, since regular-lottery FPS JSON did not contain aiPredictedNumbers then).
+        // Regular-lottery rows (EuroMillions, Powerball) with predictionMode='standard_lottery'
+        // MUST be skipped — their aiPredictedNumbers contain number display strings like "1,7,14"
+        // that would incorrectly trigger daily rendering.
+        // Extra guard: if prediction_family='regular' (structured column) always skip.
+        $__rowFamily   = (is_object($row) && isset($row->prediction_family)) ? (string)$row->prediction_family : '';
+        $__fpsPredMode = isset($decoded['predictionMode'])                   ? (string)$decoded['predictionMode'] : '';
+        $__fpsDailyMode = ($__rowFamily !== 'regular')
+            && ($__fpsPredMode === '' || $__fpsPredMode === 'daily_digit');
+        if ($__fpsDailyMode && empty($result['combo_strings']) && !empty($decoded['aiPredictedNumbers']) && is_array($decoded['aiPredictedNumbers'])) {
+            foreach ($decoded['aiPredictedNumbers'] as $__apn) {
+                if (!is_array($__apn)) { continue; }
+                $__apnStr = '';
+                if (!empty($__apn['display'])) {
+                    $__apnStr = mylottoexpertNormalizeDigitString((string)$__apn['display']);
+                } elseif (!empty($__apn['values'])) {
+                    $__apnStr = is_array($__apn['values'])
+                        // FIX: Use strval() not intval() — preserves digit '0' correctly.
+                        ? implode('', array_map('strval', $__apn['values']))
+                        : mylottoexpertNormalizeDigitString((string)$__apn['values']);
+                }
+                if ($__apnStr !== '' && !in_array($__apnStr, $result['combo_strings'], true)) {
+                    $result['combo_strings'][] = $__apnStr;
+                }
+            }
+            if (!empty($result['combo_strings'])) { $result['is_daily'] = true; }
+        }
+    }
+
+    // Fix daily_top_extras: handle both object format [{rank,num,display}] and simple int format
+    if (!empty($decoded['daily_top_extras']) && is_array($decoded['daily_top_extras']) && empty($result['top_extras'])) {
+        $__extractedExtras = array();
+        foreach ($decoded['daily_top_extras'] as $__dte) {
+            if (is_array($__dte)) {
+                if (isset($__dte['num'])) {
+                    $__extractedExtras[] = (int)$__dte['num'];
+                } elseif (isset($__dte['display'])) {
+                    preg_match_all('/\d+/', (string)$__dte['display'], $__m);
+                    if (!empty($__m[0])) { $__extractedExtras[] = (int)$__m[0][0]; }
+                }
+            } else {
+                $__n = (int)$__dte;
+                if ($__n >= 0) { $__extractedExtras[] = $__n; }
+            }
+        }
+        if (!empty($__extractedExtras)) {
+            $result['top_extras'] = array_values($__extractedExtras);
             $result['is_daily'] = true;
         }
     }
 
-    if (!empty($decoded['daily_top_extras']) && is_array($decoded['daily_top_extras'])) {
-        $result['top_extras'] = array_values(array_map('intval', $decoded['daily_top_extras']));
+    // Read daily_bonus_digits from top_combos_json (simple int array) when not already set
+    if (empty($result['bonus_digits']) && !empty($decoded['daily_bonus_digits']) && is_array($decoded['daily_bonus_digits'])) {
+        $result['bonus_digits'] = array_values(array_map('intval', $decoded['daily_bonus_digits']));
+        $result['bonus_digits_display'] = array_map('mylottoexpertFormatBonusDigit', $result['bonus_digits']);
+        $result['extra_digits'] = $result['bonus_digits'];
         $result['is_daily'] = true;
     }
 
-    $extraRaw = '';
-    if (is_object($row) && isset($row->extra_ball_numbers)) {
-        $extraRaw = (string)$row->extra_ball_numbers;
-    } elseif (is_array($row) && isset($row['extra_ball_numbers'])) {
-        $extraRaw = (string)$row['extra_ball_numbers'];
-    }
-    if ($extraRaw !== '') {
-        $result['extra_digits'] = mylottoexpertParseSimpleNumberCsv($extraRaw);
+    // Read extra_ball_numbers as fallback bonus digits if still empty
+    if (empty($result['extra_digits'])) {
+        $extraRaw = '';
+        if (is_object($row) && isset($row->extra_ball_numbers)) {
+            $extraRaw = (string)$row->extra_ball_numbers;
+        } elseif (is_array($row) && isset($row['extra_ball_numbers'])) {
+            $extraRaw = (string)$row['extra_ball_numbers'];
+        }
+        if ($extraRaw !== '') {
+            $result['extra_digits'] = mylottoexpertParseSimpleNumberCsv($extraRaw);
+        }
     }
 
     if (empty($result['ranked_digits'])) {
@@ -5354,10 +5626,7 @@ function mylottoexpertExtractDailySavedView($row)
         $mainDigits = mylottoexpertParseSimpleNumberCsv($mainRaw);
         if (!empty($mainDigits) && count($mainDigits) >= 2 && count($mainDigits) <= 5) {
             $result['ranked_digits'] = $mainDigits;
-            // NOTE: extra_digits alone is NOT sufficient — regular lotteries (e.g. EuroMillions)
-            // also have extra_ball_numbers. Only combo_strings or primary_combo_digits confirm
-            // that this is a daily-game prediction layout.
-            if (!empty($result['combo_strings']) || !empty($result['primary_combo_digits'])) {
+            if (!empty($result['combo_strings']) || !empty($result['primary_combo_digits']) || !empty($result['extra_digits'])) {
                 $result['is_daily'] = true;
             }
         }
@@ -5369,6 +5638,22 @@ function mylottoexpertExtractDailySavedView($row)
 
     if (empty($result['combo_strings']) && !empty($result['primary_combo_digits'])) {
         $result['combo_strings'][] = implode('', array_map('intval', $result['primary_combo_digits']));
+    }
+
+    // Build combo_strings_with_bonus from legacy data when bonus available
+    if (!empty($result['combo_strings']) && empty($result['combo_strings_with_bonus'])) {
+        $__bonusDisp = !empty($result['bonus_digits_display']) ? $result['bonus_digits_display'] : array();
+        if (empty($__bonusDisp) && !empty($result['top_extras'])) {
+            $__bonusDisp = array_map('mylottoexpertFormatBonusDigit', $result['top_extras']);
+        }
+        if (!empty($__bonusDisp)) {
+            $__bonusSuffix = ' + Bonus ' . implode(' ', $__bonusDisp);
+            foreach ($result['combo_strings'] as $__cs) {
+                $result['combo_strings_with_bonus'][] = $__cs . $__bonusSuffix;
+            }
+        } else {
+            $result['combo_strings_with_bonus'] = $result['combo_strings'];
+        }
     }
 
     return $result;
@@ -5607,6 +5892,29 @@ $favWheelingSystems = array_filter(
 
 // 1) Fetch saved predictions with timestamps
 $q = $db->getQuery(true);
+// [[SKAI_DISPLAY_SYNC]] Check which new structured columns exist
+$__snCols = array();
+try {
+    $__snColsRaw = $db->getTableColumns('#__user_saved_numbers', false);
+    $__snCols = is_array($__snColsRaw) ? array_keys($__snColsRaw) : array();
+} catch (\Throwable $_e) { $__snCols = array(); }
+
+$__snNewCols = array(
+    'save_schema_version', 'prediction_family', 'prediction_type', 'render_mode',
+    'main_display_json', 'extra_display_json', 'canonical_main_display', 'canonical_extra_display',
+    'prediction_extra_display_count', 'regular_main_numbers_json', 'regular_extra_numbers_json',
+    'daily_pick_size', 'daily_primary_prediction', 'daily_primary_prediction_json',
+    'daily_top_picks_json', 'daily_top_pick_strings_json', 'daily_bonus_digits_json',
+    'daily_influential_digits_json', 'daily_display_payload_json', 'daily_learning_payload_json',
+    'renderer_hint', 'display_variant', 'canonical_display_string'
+);
+$__snSelectNew = array();
+foreach ($__snNewCols as $__snc) {
+    if (in_array($__snc, $__snCols, true)) {
+        $__snSelectNew[] = 'sn.' . $__snc;
+    }
+}
+
 $q->select(array(
     'sn.id','sn.lottery_id','sn.next_draw_date','sn.source','sn.label','sn.main_numbers',
     'sn.extra_ball_numbers','sn.date_saved','sn.generated_at',
@@ -5627,6 +5935,10 @@ $q->select(array(
     'sn.pure_mode'
 
 ));
+// [[SKAI_DISPLAY_SYNC]] Dynamically add new structured display columns if they exist
+if (!empty($__snSelectNew)) {
+    $q->select($__snSelectNew);
+}
 $q->from($db->quoteName('#__user_saved_numbers', 'sn'));
 $q->join('LEFT', $db->quoteName('#__lotteries', 'l') . ' ON sn.lottery_id = l.lottery_id');
 
@@ -5902,13 +6214,57 @@ foreach ($groups as $groupKey => $g) {
     $allSourceNumPool = array();
     foreach ($g['preds'] as $s) {
         $src  = (string)$s->source;
-        $nums = array_filter(array_map('intval', explode(',', (string)($s->main_numbers ?? ''))));
+        $__isDailyRow = (
+            (isset($s->prediction_family) && (string)$s->prediction_family === 'daily') ||
+            (isset($s->render_mode) && (string)$s->render_mode === 'daily_combos') ||
+            (!empty($s->daily_primary_prediction))
+        );
+        if ($__isDailyRow) {
+            $nums = array();
+            if (!empty($s->daily_primary_prediction_json)) {
+                $__dpj = json_decode((string)$s->daily_primary_prediction_json, true);
+                if (is_array($__dpj)) { $nums = array_map('intval', $__dpj); }
+            }
+            if (empty($nums) && !empty($s->daily_primary_prediction)) {
+                preg_match_all('/\d/', (string)$s->daily_primary_prediction, $__dm);
+                if (!empty($__dm[0])) { $nums = array_map('intval', $__dm[0]); }
+            }
+            if (empty($nums)) {
+                $__fc = explode(',', (string)($s->main_numbers ?? ''));
+                preg_match_all('/\d/', (string)($__fc[0] ?? ''), $__dm2);
+                if (!empty($__dm2[0])) { $nums = array_map('intval', $__dm2[0]); }
+            }
+        } else {
+            $nums = array_filter(array_map('intval', explode(',', (string)($s->main_numbers ?? ''))));
+        }
         if (!isset($allSourceNumPool[$src])) { $allSourceNumPool[$src] = array(); }
         foreach ($nums as $n) { $allSourceNumPool[$src][$n] = true; }
     }
     foreach ($g['preds'] as $s) {
         $src    = (string)$s->source;
-        $myNums = array_filter(array_map('intval', explode(',', (string)($s->main_numbers ?? ''))));
+        $__isDailyRow2 = (
+            (isset($s->prediction_family) && (string)$s->prediction_family === 'daily') ||
+            (isset($s->render_mode) && (string)$s->render_mode === 'daily_combos') ||
+            (!empty($s->daily_primary_prediction))
+        );
+        if ($__isDailyRow2) {
+            $myNums = array();
+            if (!empty($s->daily_primary_prediction_json)) {
+                $__dpj2 = json_decode((string)$s->daily_primary_prediction_json, true);
+                if (is_array($__dpj2)) { $myNums = array_map('intval', $__dpj2); }
+            }
+            if (empty($myNums) && !empty($s->daily_primary_prediction)) {
+                preg_match_all('/\d/', (string)$s->daily_primary_prediction, $__dm3);
+                if (!empty($__dm3[0])) { $myNums = array_map('intval', $__dm3[0]); }
+            }
+            if (empty($myNums)) {
+                $__fc2 = explode(',', (string)($s->main_numbers ?? ''));
+                preg_match_all('/\d/', (string)($__fc2[0] ?? ''), $__dm4);
+                if (!empty($__dm4[0])) { $myNums = array_map('intval', $__dm4[0]); }
+            }
+        } else {
+            $myNums = array_filter(array_map('intval', explode(',', (string)($s->main_numbers ?? ''))));
+        }
         $otherNums = array();
         $otherSrcList = array();
         foreach ($allSourceNumPool as $otherSrc => $numSet) {
@@ -5942,10 +6298,32 @@ foreach ($groups as $groupKey => $g) {
 
     // -- Hit scoring: compare each prediction to the actual drawn numbers via $drawMap --
     foreach ($g['preds'] as $s) {
-        $predMain = array_values(array_filter(
-            array_map('intval', explode(',', (string)($s->main_numbers ?? ''))),
-            function ($n) { return $n !== 0; }
-        ));
+        $__isDailyPred = (
+            (isset($s->prediction_family) && (string)$s->prediction_family === 'daily') ||
+            (isset($s->render_mode) && (string)$s->render_mode === 'daily_combos') ||
+            (!empty($s->daily_primary_prediction))
+        );
+        if ($__isDailyPred) {
+            $predMain = array();
+            if (!empty($s->daily_primary_prediction_json)) {
+                $__dpj3 = json_decode((string)$s->daily_primary_prediction_json, true);
+                if (is_array($__dpj3)) { $predMain = array_values(array_map('intval', $__dpj3)); }
+            }
+            if (empty($predMain) && !empty($s->daily_primary_prediction)) {
+                preg_match_all('/\d/', (string)$s->daily_primary_prediction, $__dm5);
+                if (!empty($__dm5[0])) { $predMain = array_map('intval', $__dm5[0]); }
+            }
+            if (empty($predMain)) {
+                $__fc3 = explode(',', (string)($s->main_numbers ?? ''));
+                preg_match_all('/\d/', (string)($__fc3[0] ?? ''), $__dm6);
+                if (!empty($__dm6[0])) { $predMain = array_map('intval', $__dm6[0]); }
+            }
+        } else {
+            $predMain = array_values(array_filter(
+                array_map('intval', explode(',', (string)($s->main_numbers ?? ''))),
+                function ($n) { return $n !== 0; }
+            ));
+        }
         $predExtra = 0;
         if (isset($s->extra_ball_numbers) && $s->extra_ball_numbers !== '' && $s->extra_ball_numbers !== null) {
             $tmp = array_values(array_filter(array_map('intval', explode(',', (string)$s->extra_ball_numbers))));
@@ -7155,6 +7533,7 @@ foreach ($bestOpps as $__sopp) {
         <?php echo \Joomla\CMS\HTML\HTMLHelper::_('form.token'); ?>
         <input type="hidden" name="delete_set_selected" id="prc-del-val-<?php echo $__prcSectionId; ?>" value="">
         <button type="submit" class="btn-danger" style="font-size:0.8rem; padding:0.3rem 0.9rem;">&#x1F5D1; Delete Selected</button>
+        <button type="button" class="btn-secondary" style="font-size:0.8rem; padding:0.3rem 0.9rem;" data-prc-select-upcoming-btn="1" data-prc-section-id="<?php echo $__prcSectionId; ?>" aria-label="Select all upcoming predictions that have not yet been scored">Select Upcoming</button>
         <button type="button" class="btn-secondary" style="font-size:0.8rem; padding:0.3rem 0.9rem;" data-prc-clear-btn="1" data-prc-section-id="<?php echo $__prcSectionId; ?>">Clear selection</button>
         <span class="prc-del-hint">Tick one or more checkboxes, then click "Delete Selected" to remove them. Change your mind? Click "Clear Selection".</span>
       </form>
@@ -9800,80 +10179,103 @@ $methodKeys = ['skip_hit','ai_prediction','mcmc_prediction','skai_prediction','h
               <?php endif; ?>
 
               <?php
-                $predMain = array_slice(
-                  array_map('intval', explode(',', (string)$s->main_numbers)),
-                  0,
-                  20
-                );
-                $predExtra = array();
-                if (!empty($s->extra_ball_numbers)) {
-                  $predExtra = array_slice(
-                    array_map('intval', explode(',', (string)$s->extra_ball_numbers)),
-                    0,
-                    5
-                  );
-                }
+                // [[SKAI_DISPLAY_SYNC]] Prefer structured display fields; fall back to legacy CSV
+                $__regularView = mylottoexpertExtractRegularSavedView($s);
+                $predMain  = array_slice($__regularView['main'], 0, 20);
+                $predExtra = array_slice($__regularView['extra'], 0, 5);
                 $__dailyView = mylottoexpertExtractDailySavedView($s);
               ?>
 
               <?php if (!empty($__dailyView['is_daily'])): ?>
+                <?php
+                  $__dailyPickSizeLabel = ($__dailyView['pick_size'] > 0) ? (int)$__dailyView['pick_size'] : '';
+                  $__dailyCombosLabel   = $__dailyPickSizeLabel !== '' ? ('Top Pick ' . $__dailyPickSizeLabel . ' Combinations') : 'Top Predicted Combinations';
+                  // Use bonus-appended combo strings when available, non-empty, and different from plain strings
+                  $__dailyUseWithBonus  = !empty($__dailyView['combo_strings'])
+                    && !empty($__dailyView['combo_strings_with_bonus'])
+                    && (count($__dailyView['combo_strings_with_bonus']) === count($__dailyView['combo_strings']))
+                    && ($__dailyView['combo_strings_with_bonus'] !== $__dailyView['combo_strings']);
+                  $__dailyCombosForDisp = $__dailyUseWithBonus ? $__dailyView['combo_strings_with_bonus'] : $__dailyView['combo_strings'];
+                  // Resolve bonus digits: prefer structured bonus_digits, then extra_digits, then legacy top_extras
+                  if (!empty($__dailyView['bonus_digits'])) {
+                    $__dailyBonusForDisp = $__dailyView['bonus_digits'];
+                  } elseif (!empty($__dailyView['extra_digits'])) {
+                    $__dailyBonusForDisp = $__dailyView['extra_digits'];
+                  } else {
+                    $__dailyBonusForDisp = $__dailyView['top_extras'];
+                  }
+                  // Resolve formatted bonus display strings (with leading zeros for 0-9)
+                  if (!empty($__dailyView['bonus_digits_display'])) {
+                    $__dailyBonusDispArr = $__dailyView['bonus_digits_display'];
+                  } else {
+                    $__dailyBonusDispArr = array_map('mylottoexpertFormatBonusDigit', (array)$__dailyBonusForDisp);
+                  }
+                ?>
                 <div class="mle-daily-summary">
                   <span class="mle-daily-summary__eyebrow">Daily Prediction Summary</span>
                   <div class="mle-daily-summary__grid">
+
+                    <?php if (!empty($__dailyView['ranked_digits'])): ?>
                     <div class="mle-daily-summary__card">
-                      <span class="mle-daily-summary__label">Ranked Daily Digits</span>
+                      <span class="mle-daily-summary__label">Most Influential Digits</span>
                       <div class="mle-daily-pill-row">
-                        <?php foreach (($__dailyView['ranked_digits'] ?? array()) as $n):
+                        <?php foreach ($__dailyView['ranked_digits'] as $n):
                           $isHit = in_array((int)$n, $drawMain, true);
                           $cls = $isHit ? 'match-pill' : 'no-match';
                         ?>
                           <span class="<?php echo $cls; ?>"><?php echo (int)$n; ?></span>
                         <?php endforeach; ?>
                       </div>
-                      <div class="mle-daily-summary__subtext">Digits ranked by SKAI score. This is the ladder the user saw at run time.</div>
+                      <div class="mle-daily-summary__subtext">Strongest single-digit signals. These drove the combination rankings below.</div>
                     </div>
+                    <?php endif; ?>
 
+                    <?php if (!empty($__dailyView['primary_combo_digits'])): ?>
                     <div class="mle-daily-summary__card">
-                      <span class="mle-daily-summary__label">Primary Daily Combo</span>
+                      <span class="mle-daily-summary__label">Top Predicted Combination</span>
                       <div class="mle-daily-pill-row">
-                        <?php foreach (($__dailyView['primary_combo_digits'] ?? array()) as $n):
+                        <?php foreach ($__dailyView['primary_combo_digits'] as $n):
                           $isHit = in_array((int)$n, $drawMain, true);
                           $cls = $isHit ? 'match-pill' : 'no-match';
                         ?>
                           <span class="<?php echo $cls; ?>"><?php echo (int)$n; ?></span>
                         <?php endforeach; ?>
                       </div>
-                      <div class="mle-daily-summary__subtext">Top straight combination from the high-probability combo list.</div>
+                      <div class="mle-daily-summary__subtext">Highest-probability straight combination from the daily prediction run.</div>
                     </div>
+                    <?php endif; ?>
 
+                    <?php if (!empty($__dailyCombosForDisp)): ?>
                     <div class="mle-daily-summary__card mle-daily-summary__card--full">
-                      <span class="mle-daily-summary__label">High Probability Combinations</span>
+                      <span class="mle-daily-summary__label"><?php echo htmlspecialchars($__dailyCombosLabel, ENT_QUOTES); ?></span>
                       <div class="mle-daily-combo-row">
-                        <?php foreach (($__dailyView['combo_strings'] ?? array()) as $__comboIndex => $__comboString): ?>
+                        <?php foreach ($__dailyCombosForDisp as $__comboIndex => $__comboString): ?>
                           <span class="mle-daily-combo-chip">
                             <span class="mle-daily-combo-chip__rank">#<?php echo (int)($__comboIndex + 1); ?></span>
                             <span><?php echo htmlspecialchars((string)$__comboString, ENT_QUOTES); ?></span>
                           </span>
                         <?php endforeach; ?>
                       </div>
-                      <div class="mle-daily-summary__subtext">These are the saved daily combinations for post-draw verification. They should mirror the front-end daily combo panel.</div>
-                    </div>
-
-                    <?php if (!empty($__dailyView['extra_digits']) || !empty($__dailyView['top_extras'])): ?>
-                    <div class="mle-daily-summary__card mle-daily-summary__card--full">
-                      <span class="mle-daily-summary__label"><?php echo htmlspecialchars($extraLabel, ENT_QUOTES); ?></span>
-                      <div class="mle-daily-pill-row">
-                        <?php
-                          $__dailyExtraDisplay = !empty($__dailyView['extra_digits']) ? $__dailyView['extra_digits'] : $__dailyView['top_extras'];
-                          foreach ($__dailyExtraDisplay as $e):
-                            $isHit = in_array((int)$e, $drawExtra, true);
-                            $cls = $isHit ? 'match-pill extra' : 'no-match extra';
-                        ?>
-                          <span class="<?php echo $cls; ?>"><?php echo (int)$e; ?></span>
-                        <?php endforeach; ?>
-                      </div>
+                      <div class="mle-daily-summary__subtext">Saved daily combinations. These mirror what SKAI showed at prediction time.</div>
                     </div>
                     <?php endif; ?>
+
+                    <?php if (!empty($__dailyBonusForDisp) && !$__dailyUseWithBonus): ?>
+                    <div class="mle-daily-summary__card mle-daily-summary__card--full">
+                      <span class="mle-daily-summary__label">Top Bonus Digits</span>
+                      <div class="mle-daily-pill-row">
+                        <?php foreach ($__dailyBonusDispArr as $__bonusIdx => $__bonusStr):
+                          $__bonusNum = isset($__dailyBonusForDisp[$__bonusIdx]) ? (int)$__dailyBonusForDisp[$__bonusIdx] : (int)$__bonusStr;
+                          $isHit = in_array($__bonusNum, $drawExtra, true);
+                          $cls = $isHit ? 'match-pill extra' : 'no-match extra';
+                        ?>
+                          <span class="<?php echo $cls; ?>"><?php echo htmlspecialchars($__bonusStr, ENT_QUOTES); ?></span>
+                        <?php endforeach; ?>
+                      </div>
+                      <div class="mle-daily-summary__subtext">Bonus digits saved alongside the daily combinations.</div>
+                    </div>
+                    <?php endif; ?>
+
                   </div>
                 </div>
               <?php else: ?>
@@ -13155,6 +13557,25 @@ function skaiPrcClearCheckboxes(sectionId) {
   }
 }
 
+// ============================================================
+// skaiPrcSelectUpcoming: Select only checkboxes whose table row is an
+// upcoming (not-yet-scored) prediction.  Past draws are left untouched.
+// Upcoming rows carry the CSS class "prc-row-pending" on the <tr>.
+// ES5-compatible; no dependencies.
+// ============================================================
+function skaiPrcSelectUpcoming(sectionId) {
+  var checkboxes = document.querySelectorAll('input[name="prc_del_' + sectionId + '"]');
+  for (var i = 0; i < checkboxes.length; i++) {
+    var cb = checkboxes[i];
+    // Walk up to the closest <tr> and check whether it is an upcoming row
+    var row = cb.parentNode;
+    while (row && row.nodeName.toUpperCase() !== 'TR') { row = row.parentNode; }
+    if (row && row.className && row.className.indexOf('prc-row-pending') !== -1) {
+      cb.checked = true;
+    }
+  }
+}
+
 /* ===== merged script section ===== */
 
 // ============================================================
@@ -14114,6 +14535,10 @@ document.addEventListener('click', function(evt) {
   while (node && node.nodeType === 1) {
     if (node.getAttribute && node.getAttribute('data-prc-clear-btn') === '1') {
       skaiPrcClearCheckboxes(node.getAttribute('data-prc-section-id'));
+      return;
+    }
+    if (node.getAttribute && node.getAttribute('data-prc-select-upcoming-btn') === '1') {
+      skaiPrcSelectUpcoming(node.getAttribute('data-prc-section-id'));
       return;
     }
     if (node.getAttribute && node.getAttribute('data-lottery-toggle-all-btn') === '1') {
