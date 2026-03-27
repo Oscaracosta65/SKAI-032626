@@ -38540,6 +38540,25 @@ try {
     }
     if (window.SKAI_lastScoreByNum) window.SKAI_lastScoreByNum[String(num)] = score;
 
+    // FIX: Apply diversity noise to main ball scores so different profile/strategy combos
+    // produce different top picks even for large-domain games (Powerball 69 balls, EuroMillions
+    // 50 balls) where blend/temperature changes alone are insufficient to reshuffle the top-5
+    // from a strongly concentrated ML probability distribution.  The same mechanism already
+    // exists in adjustProbExtra() for extra-ball training; this mirrors it for main balls.
+    var _diversityMain = (settings && settings.diversityPenalty != null && isFinite(+settings.diversityPenalty))
+      ? +settings.diversityPenalty : 0.02;
+    if (_diversityMain > 0) {
+      var _mainNoise;
+      if (window.SKAI_DETERMINISTIC && window.SKAI_DETERMINISTIC.enabled) {
+        // Reproducibility mode: use deterministic epsilon tie-breaker instead of random noise
+        _mainNoise = 1e-8 * (window.SKAI_DETERMINISTIC.tieBreaker ? window.SKAI_DETERMINISTIC.tieBreaker(num) : 0);
+      } else {
+        _mainNoise = (Math.random() - 0.5) * 2 * _diversityMain;
+      }
+      score += _mainNoise;
+      if (score < 0) score = 0;
+    }
+
     blended.push({
       num: num,
       score: score,
@@ -38635,7 +38654,8 @@ try {
                         ? settings.blend
                         : undefined,
           mainLimit:  20,
-          extraLimit: !!(window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame)) ? 3 : 5
+          extraLimit: !!(window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame)
+                          && !window.SKAI_META.hasExtraBall) ? 3 : 5
         }
       };
       window.SKAI_BLEND_RESULTS = window.SKAI_blendEngine.run(blendInput);
@@ -39264,7 +39284,13 @@ window.SKAI_runExtra = function runExtraBallML(settings) {
               return (b.score - a.score) || (a.num - b.num);
             });
 
-            var maxExtra = !!(meta && (meta.isDaily || meta.isDailyDigitGame)) ? 3 : 5;
+            // FIX: For extra-ball games (hasExtraBall=true, e.g. EuroMillions, Powerball), always
+            // generate 5 predictions regardless of the isDaily flag.  Some databases incorrectly
+            // mark weekly jackpot games as is_daily=1; that must not reduce extra predictions from
+            // 5 to 3.  The 3-prediction limit is reserved for daily digit bonus digits only
+            // (Pick-3/4/5 bonus, no real extra ball).
+            var maxExtra = !!(meta && meta.hasExtraBall) ? 5
+              : !!(meta && (meta.isDaily || meta.isDailyDigitGame)) ? 3 : 5;
             var topX = blendedX.slice(0, Math.min(blendedX.length, maxExtra));
 
             SKAI_assert(
@@ -39879,7 +39905,9 @@ try {
               aiX.appendChild(lab);
 
             var frag2 = document.createDocumentFragment();
-            var _txLimit = isDailyGame ? 3 : 5;
+            // FIX: For extra-ball games (hasExtraBall=true), show 5 even if isDailyGame is true
+            // (possible due to wrong is_daily DB flag on weekly jackpot games).
+            var _txLimit = (isDailyGame && !hasExtra) ? 3 : 5;
             for (var tx=0; tx<topXr.length && tx<_txLimit; tx++){
               var itemX = topXr[tx];
 
@@ -40362,7 +40390,12 @@ try {
           }
 
           var frag2 = document.createDocumentFragment();
-          var _txLimitR = !!(window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame)) ? 3 : 5;
+          // FIX: For extra-ball games (hasExtraBall=true), always show up to 5 predictions.
+          // The 3-slot limit is for daily-digit bonus digits (no real extra ball).
+          // If is_daily is wrongly set for a weekly jackpot game (e.g. EuroMillions) the
+          // hasExtraBall guard below ensures we still display the correct 5 predictions.
+          var _txLimitR = !!(window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame)
+            && !window.SKAI_META.hasExtraBall) ? 3 : 5;
           for (var tx = 0; tx < topX.length && tx < _txLimitR; tx++){
             var itemX = topX[tx];
             var numX  = itemX && itemX.num;
@@ -40395,6 +40428,56 @@ try {
               window.SKAI_renderExtras();
             }
           } catch(_){}
+          // FIX: Patch SKAI_FINAL_PREDICTION_SETS extras now that extra training has
+          // completed.  On the initial SKAI_buildFinalCombos call (inside
+          // SKAI_scoreAndRender), SKAI_TOP_EXTRA was still empty so all FPS entries
+          // carried extra:[].  We update them in-place here so captureResult() and the
+          // save pipeline receive the real trained extra picks (Powerball, EuroMillions, …).
+          try {
+            if (Array.isArray(window.SKAI_TOP_EXTRA) && window.SKAI_TOP_EXTRA.length &&
+                window.SKAI_META && window.SKAI_META.hasExtraBall) {
+              var _patchExtras = [];
+              for (var _pex = 0; _pex < window.SKAI_TOP_EXTRA.length && _patchExtras.length < 5; _pex++) {
+                var _pexEntry = window.SKAI_TOP_EXTRA[_pex];
+                if (_pexEntry && _pexEntry.num != null) { _patchExtras.push(_pexEntry.num); }
+              }
+              if (_patchExtras.length && Array.isArray(window.SKAI_FINAL_PREDICTION_SETS)) {
+                for (var _fpsPatch = 0; _fpsPatch < window.SKAI_FINAL_PREDICTION_SETS.length; _fpsPatch++) {
+                  if (window.SKAI_FINAL_PREDICTION_SETS[_fpsPatch]) {
+                    window.SKAI_FINAL_PREDICTION_SETS[_fpsPatch].extra = _patchExtras.slice();
+                  }
+                }
+                // Re-serialize so captureResult() and the save pipeline get the patched extras.
+                try {
+                  var _patchedFpsJson = window.__SKAI_FPS_JSON__;
+                  if (_patchedFpsJson) {
+                    var _pObj = JSON.parse(_patchedFpsJson);
+                    if (_pObj && Array.isArray(_pObj.final_prediction_sets)) {
+                      for (var _pfk = 0; _pfk < _pObj.final_prediction_sets.length; _pfk++) {
+                        _pObj.final_prediction_sets[_pfk].extra = _patchExtras.slice();
+                      }
+                    }
+                    if (_pObj && Array.isArray(_pObj.top_5_prediction_sets)) {
+                      for (var _ptk = 0; _ptk < _pObj.top_5_prediction_sets.length; _ptk++) {
+                        _pObj.top_5_prediction_sets[_ptk].extra = _patchExtras.slice();
+                      }
+                    }
+                    if (_pObj && _pObj.primary_prediction_set) {
+                      _pObj.primary_prediction_set.extra = _patchExtras.slice();
+                    }
+                    window.__SKAI_FPS_JSON__ = JSON.stringify(_pObj);
+                    // Also update the hidden form fields
+                    try {
+                      var _pFpsFlds = document.querySelectorAll('input[name="top_combos_json"]');
+                      for (var _pfl = 0; _pfl < _pFpsFlds.length; _pfl++) {
+                        try { _pFpsFlds[_pfl].value = window.__SKAI_FPS_JSON__; } catch(_){}
+                      }
+                    } catch(_){}
+                  }
+                } catch(_) {}
+              }
+            }
+          } catch(_) {}
         });
       }
     } catch(_){}
@@ -41017,7 +41100,13 @@ try {
           : mainsArrDom;
       }
 
-      var _isDailyForExtra = !!(window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame));
+      // FIX: Extra-ball games (hasExtraBall=true) must never take the daily-digit path.
+      // Some databases incorrectly tag weekly jackpot games as is_daily=1; that must not
+      // redirect EuroMillions / Powerball into the daily-digit bonus-digit branch which
+      // reads SKAI_DAILY_EXTRA_DIGITS (empty for real extra-ball games) instead of
+      // SKAI_TOP_EXTRA / skaiSaveExtraOrdered.
+      var _isDailyForExtra = !!(window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame)
+        && !window.SKAI_META.hasExtraBall);
       var _extraLimit = _isDailyForExtra ? 3 : 5;
       var extraArr = [];
       if (_isDailyForExtra) {
@@ -49576,8 +49665,10 @@ document.addEventListener('DOMContentLoaded', function () {
       // Always reset per-combo main/extra to prevent stale carry-over from previous combo
       window.skaiSaveMainOrdered  = (r.mainNumbers && r.mainNumbers.length) ? r.mainNumbers.slice() : [];
       window.skaiSaveExtraOrdered = (r.extraNumbers && r.extraNumbers.length)
-        ? r.extraNumbers.slice(0, (!!(window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame)) ? 3 : 5)) : [];
-      if (!(window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame))) {
+        ? r.extraNumbers.slice(0, (!!(window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame)
+            && !window.SKAI_META.hasExtraBall) ? 3 : 5)) : [];
+      if (!(window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame)
+            && !window.SKAI_META.hasExtraBall)) {
         var _restoreExtra = [];
         if (r.extraNumbers && r.extraNumbers.length) { _restoreExtra = normalizeNumericArray(r.extraNumbers).slice(0, 5); }
         if (r.finalPredictionSets && r.finalPredictionSets.length) {
