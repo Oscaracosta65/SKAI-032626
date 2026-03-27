@@ -1853,6 +1853,12 @@ function SKAI_runAdminMigration(): array
         $details['schema_upgrade'] = $r;
     }
 
+    // [[SKAI_DISPLAY_SYNC]] Schema upgrade for display/save/render structured fields.
+    if (function_exists('skaiEnsureUserSavedNumbersCols')) {
+        $r = skaiEnsureUserSavedNumbersCols();
+        $details['user_saved_numbers_display_sync'] = $r;
+    }
+
     // Idempotent migration: ensure game_id VARCHAR(50) in #__skai_shared_learning.
     if (function_exists('SKAI_runSharedLearningLotteryIdMigration')) {
         $r = SKAI_runSharedLearningLotteryIdMigration();
@@ -6778,6 +6784,77 @@ function SKAI_runSafeSchemaUpgrade() {
 }
 
 /**
+ * [[SKAI_DISPLAY_SYNC]] Idempotent schema upgrade for #__user_saved_numbers.
+ * Adds structured display/save fields required for display-save-render parity.
+ * Safe to call multiple times. Never destroys existing data. PHP 8.1 / Joomla 5.1.2 compatible.
+ *
+ * @return array{success:bool,message:string,added:array,skipped:array}
+ */
+function skaiEnsureUserSavedNumbersCols()
+{
+    static $__sdsDone = null;
+    if ($__sdsDone !== null) { return $__sdsDone; }
+    try {
+        $db   = \Joomla\CMS\Factory::getDbo();
+        $cols = $db->getTableColumns('#__user_saved_numbers', false);
+        if (!is_array($cols)) {
+            return $__sdsDone = ['success' => false, 'message' => 'Could not read #__user_saved_numbers columns', 'added' => [], 'skipped' => []];
+        }
+        $prefix = $db->getPrefix();
+        $table  = $prefix . 'user_saved_numbers';
+        $added   = [];
+        $skipped = [];
+
+        // Column definitions: name => SQL definition (no AFTER clause for portability)
+        $newCols = [
+            'save_schema_version'           => "INT NOT NULL DEFAULT 2 COMMENT 'Schema version marker for structured display fields'",
+            'prediction_family'             => "VARCHAR(30) NULL COMMENT 'regular or daily'",
+            'prediction_type'               => "VARCHAR(50) NULL COMMENT 'powerball euromillions pick3 pick4 pick5 etc'",
+            'render_mode'                   => "VARCHAR(40) NULL COMMENT 'regular_main_extra or daily_combos'",
+            'main_display_json'             => "TEXT NULL COMMENT 'JSON array of main display numbers in probability order'",
+            'extra_display_json'            => "TEXT NULL COMMENT 'JSON array of extra/bonus display numbers in probability order'",
+            'canonical_main_display'        => "VARCHAR(500) NULL COMMENT 'CSV of main display numbers canonical probability order'",
+            'canonical_extra_display'       => "VARCHAR(200) NULL COMMENT 'CSV of extra display numbers canonical'",
+            'prediction_extra_display_count' => "INT NULL COMMENT 'Count of extra/bonus numbers in display set'",
+            'regular_main_numbers_json'     => "TEXT NULL COMMENT 'Regular lottery: JSON array of main numbers for display'",
+            'regular_extra_numbers_json'    => "TEXT NULL COMMENT 'Regular lottery: JSON array of extra/bonus numbers for display'",
+            'daily_pick_size'               => "TINYINT NULL COMMENT 'Daily lottery: pick size 3 4 or 5'",
+            'daily_primary_prediction'      => "VARCHAR(30) NULL COMMENT 'Daily lottery: primary combo display string e.g. 123'",
+            'daily_primary_prediction_json' => "TEXT NULL COMMENT 'Daily lottery: JSON array of primary combo digits'",
+            'daily_top_picks_json'          => "TEXT NULL COMMENT 'Daily lottery: JSON array of top-5 combo display strings'",
+            'daily_top_pick_strings_json'   => "TEXT NULL COMMENT 'Daily lottery: JSON array of top-5 combo strings with bonus display'",
+            'daily_bonus_digits_json'       => "TEXT NULL COMMENT 'Daily lottery: JSON array of bonus digit integers'",
+            'daily_influential_digits_json' => "TEXT NULL COMMENT 'Daily lottery: JSON array of ranked/influential digit integers'",
+            'daily_display_payload_json'    => "MEDIUMTEXT NULL COMMENT 'Daily lottery: full canonical display payload for rendering'",
+            'daily_learning_payload_json'   => "MEDIUMTEXT NULL COMMENT 'Daily lottery: structured payload for learning/tracking'",
+            'display_variant'               => "VARCHAR(40) NULL COMMENT 'Renderer display variant hint'",
+            'renderer_hint'                 => "VARCHAR(40) NULL COMMENT 'Renderer hint for MyLottoExpert display logic'",
+            'canonical_display_string'      => "VARCHAR(500) NULL COMMENT 'Human-readable canonical display summary string'",
+        ];
+
+        foreach ($newCols as $colName => $colDef) {
+            if (isset($cols[$colName])) {
+                $skipped[] = $colName;
+                continue;
+            }
+            try {
+                $db->setQuery("ALTER TABLE `{$table}` ADD COLUMN `{$colName}` {$colDef}");
+                $db->execute();
+                $added[] = $colName;
+            } catch (\Throwable $e) {
+                error_log('[SKAI_DISPLAY_SYNC] skaiEnsureUserSavedNumbersCols: failed to add ' . $colName . ': ' . $e->getMessage());
+            }
+        }
+        $msg = 'skaiEnsureUserSavedNumbersCols complete: added=[' . implode(',', $added) . '] skipped=' . count($skipped);
+        error_log('[SKAI_DISPLAY_SYNC] ' . $msg);
+        return $__sdsDone = ['success' => true, 'message' => $msg, 'added' => $added, 'skipped' => $skipped];
+    } catch (\Throwable $e) {
+        error_log('[SKAI_DISPLAY_SYNC] skaiEnsureUserSavedNumbersCols error: ' . $e->getMessage());
+        return $__sdsDone = ['success' => false, 'message' => $e->getMessage(), 'added' => [], 'skipped' => []];
+    }
+}
+
+/**
  * [[SKAI_PHASE_C]] Idempotent migration: ensure game_id VARCHAR(50) in #__skai_shared_learning.
  *
  * Canonical shared-learning identity is the string game_id (e.g. "101", "AZ2"), not the
@@ -8649,9 +8726,12 @@ $labelInput = implode(' - ', $parts);
         if ($isDailyGamePosted && !empty($dailyDisplaySet)) {
             $mainArr = array_values($dailyDisplaySet);
         } else {
-            $mainArr  = $norm($mainArr,  $isDaily, $isDailyGamePosted);
+            // FIX: use $isDailyGamePosted as a second gate for allowZero so that daily
+            // games whose config uses non-standard key names (and therefore $isDaily=false)
+            // still preserve digit 0 in main and extra arrays.
+            $mainArr  = $norm($mainArr,  $isDaily || $isDailyGamePosted, $isDailyGamePosted);
         }
-        $extraArr = $norm($extraArr, $isDaily, $isDailyGamePosted);
+        $extraArr = $norm($extraArr, $isDaily || $isDailyGamePosted, $isDailyGamePosted);
 
         // --- Strict validation against config (size, range, uniqueness) ---
         $pickSize = (int) ($lotteryConfig['lotteryConfig']['pickSize'] ?? $lotteryConfig['pickSize'] ?? 0);
@@ -8667,9 +8747,9 @@ $labelInput = implode(' - ', $parts);
         $sourceNorm = preg_replace('/[^a-z0-9_\-]/i', '', $sourceRaw) ?: 'skip_hit';
         $isSkaiPool = in_array($sourceNorm, ['skai_prediction', 'skai_ai'], true);
 
-        // Clamp mins
-        if ($mainMin <= 0) $mainMin = $isDaily ? 0 : 1;
-        if ($extraMin <= 0) $extraMin = $isDaily ? 0 : 1;
+        // Clamp mins: daily games (by config OR by posted flag) allow digit 0.
+        if ($mainMin <= 0) $mainMin = ($isDaily || $isDailyGamePosted) ? 0 : 1;
+        if ($extraMin <= 0) $extraMin = ($isDaily || $isDailyGamePosted) ? 0 : 1;
 
         // Range filter (drop anything out of range)
         if ($isDailyGamePosted && !empty($dailyDisplaySet)) {
@@ -9209,6 +9289,112 @@ $skaiSettings = [
 // Encode once here; DB insert step will keep it as string
 $skaiSettingsJson = json_encode($skaiSettings, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 
+// [[SKAI_DISPLAY_SYNC]] Compute structured display fields for save/render parity
+$__lNameForType = strtolower((string)($lotteryConfig['lotteryName'] ?? $lotteryConfig['lottery_name'] ?? $lotteryConfig['game_name'] ?? ''));
+if (strpos($__lNameForType, 'powerball') !== false) {
+    $__predType = 'powerball';
+} elseif (strpos($__lNameForType, 'euro') !== false && strpos($__lNameForType, 'million') !== false) {
+    $__predType = 'euromillions';
+} elseif ($isDailyGamePosted) {
+    $__ps = (int)($cfgPick ?: ($pickLength ?? 0) ?: count($mainArr));
+    if ($__ps === 3) { $__predType = 'pick3'; }
+    elseif ($__ps === 4) { $__predType = 'pick4'; }
+    elseif ($__ps === 5) { $__predType = 'pick5'; }
+    else { $__predType = 'daily'; }
+} else {
+    $__predType = 'regular';
+}
+
+$__dailyPickSizeRow    = $isDailyGamePosted ? (int)($cfgPick ?: ($pickLength ?? 0) ?: count($mainArr)) : null;
+$__dailyPrimPredRow    = null;
+$__dailyPrimPredDigits = null;
+$__dailyTopPicksRow    = null;
+$__dailyTopPickStrRow  = null;
+$__dailyBonusDigRow    = null;
+$__dailyInflDigRow     = null;
+$__dailyDispPayload    = null;
+$__dailyLearnPayload   = null;
+
+if ($isDailyGamePosted) {
+    // Primary prediction display string
+    if (!empty($dailyDisplayMain)) {
+        $__dailyPrimPredRow = (string)$dailyDisplayMain;
+    } elseif (is_array($evidenceDecoded) && !empty($evidenceDecoded['daily_primary_combo_display'])) {
+        $__dailyPrimPredRow = (string)$evidenceDecoded['daily_primary_combo_display'];
+    } elseif (is_array($evidenceDecoded) && !empty($evidenceDecoded['daily_primary_combo'])) {
+        $__dailyPrimPredRow = (string)$evidenceDecoded['daily_primary_combo'];
+    } elseif (!empty($dailyDisplaySet)) {
+        $__dailyPrimPredRow = (string)$dailyDisplaySet[0];
+    }
+
+    // Primary prediction digits (JSON array)
+    if (is_array($evidenceDecoded) && !empty($evidenceDecoded['daily_primary_combo_digits']) && is_array($evidenceDecoded['daily_primary_combo_digits'])) {
+        $__dailyPrimPredDigits = json_encode(array_values(array_map('intval', $evidenceDecoded['daily_primary_combo_digits'])), JSON_UNESCAPED_SLASHES);
+    } elseif (!empty($__dailyPrimPredRow)) {
+        preg_match_all('/\d/', (string)$__dailyPrimPredRow, $__dm);
+        $__dailyPrimPredDigits = !empty($__dm[0]) ? json_encode(array_map('intval', $__dm[0]), JSON_UNESCAPED_SLASHES) : null;
+    }
+
+    // Top picks (combo display strings, JSON array)
+    if (!empty($dailyDisplaySet)) {
+        $__dailyTopPicksRow = json_encode(array_values($dailyDisplaySet), JSON_UNESCAPED_SLASHES);
+    } elseif (is_array($evidenceDecoded) && !empty($evidenceDecoded['daily_combo_strings']) && is_array($evidenceDecoded['daily_combo_strings'])) {
+        $__dailyTopPicksRow = json_encode(array_values($evidenceDecoded['daily_combo_strings']), JSON_UNESCAPED_SLASHES);
+    } elseif (is_array($evidenceDecoded) && !empty($evidenceDecoded['daily_top_combo_strings']) && is_array($evidenceDecoded['daily_top_combo_strings'])) {
+        $__dailyTopPicksRow = json_encode(array_values($evidenceDecoded['daily_top_combo_strings']), JSON_UNESCAPED_SLASHES);
+    }
+
+    // Bonus digits (JSON array of ints)
+    // [[SKAI_DISPLAY_SYNC]] Read daily_bonus_digits first; fall back to daily_extra_digits
+    // (the key written by skaiPrepareAiSave and the batch-save injection) before $extraArr.
+    if (is_array($evidenceDecoded) && !empty($evidenceDecoded['daily_bonus_digits']) && is_array($evidenceDecoded['daily_bonus_digits'])) {
+        $__dailyBonusDigRow = json_encode(array_values(array_map('intval', $evidenceDecoded['daily_bonus_digits'])), JSON_UNESCAPED_SLASHES);
+    } elseif (is_array($evidenceDecoded) && !empty($evidenceDecoded['daily_extra_digits']) && is_array($evidenceDecoded['daily_extra_digits'])) {
+        $__dailyBonusDigRow = json_encode(array_values(array_map('intval', $evidenceDecoded['daily_extra_digits'])), JSON_UNESCAPED_SLASHES);
+    } elseif (!empty($extraArr)) {
+        $__dailyBonusDigRow = json_encode(array_values(array_map('intval', $extraArr)), JSON_UNESCAPED_SLASHES);
+    }
+
+    // Influential/ranked digits (JSON array of ints)
+    if (is_array($evidenceDecoded) && !empty($evidenceDecoded['daily_ranked_digits']) && is_array($evidenceDecoded['daily_ranked_digits'])) {
+        $__dailyInflDigRow = json_encode(array_values(array_map('intval', $evidenceDecoded['daily_ranked_digits'])), JSON_UNESCAPED_SLASHES);
+    }
+
+    // Top pick strings with bonus (JSON array of strings like "123 + Bonus 03 07")
+    $__topPicksForStr = !empty($dailyDisplaySet) ? array_values($dailyDisplaySet) : [];
+    if (!empty($__topPicksForStr)) {
+        $__bonusForStr = !empty($extraArr) ? array_values(array_map('intval', $extraArr)) : [];
+        if (!empty($__bonusForStr)) {
+            $__bonusDispForStr = array_map(static function($n) { $n=(int)$n; return ($n>=0&&$n<10)?('0'.$n):(string)$n; }, $__bonusForStr);
+            $__bonusSuffixStr  = ' + Bonus ' . implode(' ', $__bonusDispForStr);
+            $__dailyTopPickStrRow = json_encode(array_map(static function($s) use ($__bonusSuffixStr){ return $s . $__bonusSuffixStr; }, $__topPicksForStr), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        } else {
+            $__dailyTopPickStrRow = json_encode($__topPicksForStr, JSON_UNESCAPED_SLASHES);
+        }
+    }
+
+    // Daily display payload (canonical structured payload for rendering)
+    $__dailyDispPayload = json_encode([
+        'pick_size'          => $__dailyPickSizeRow,
+        'primary_prediction' => $__dailyPrimPredRow,
+        'top_picks'          => !empty($dailyDisplaySet) ? array_values($dailyDisplaySet) : [],
+        'bonus_digits'       => !empty($extraArr) ? array_values(array_map('intval', $extraArr)) : [],
+        'influential_digits' => (is_array($evidenceDecoded) && !empty($evidenceDecoded['daily_ranked_digits'])) ? array_values(array_map('intval', $evidenceDecoded['daily_ranked_digits'])) : [],
+        'schema_version'     => 2,
+    ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+
+    // Daily learning payload (preserve for calibration/learning/tracking - DO NOT REMOVE)
+    $__dailyLearnPayload = json_encode([
+        'pick_size'            => $__dailyPickSizeRow,
+        'primary_prediction'   => $__dailyPrimPredRow,
+        'top_picks'            => !empty($dailyDisplaySet) ? array_values($dailyDisplaySet) : [],
+        'ranked_digits'        => (is_array($evidenceDecoded) && !empty($evidenceDecoded['daily_ranked_digits'])) ? array_values(array_map('intval', $evidenceDecoded['daily_ranked_digits'])) : [],
+        'bonus_digits'         => !empty($extraArr) ? array_values(array_map('intval', $extraArr)) : [],
+        'primary_combo_digits' => (is_array($evidenceDecoded) && !empty($evidenceDecoded['daily_primary_combo_digits'])) ? array_values(array_map('intval', $evidenceDecoded['daily_primary_combo_digits'])) : [],
+        'schema_version'       => 2,
+    ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+}
+
 $row = (object) [
     'user_id'             => (int) $user->id,
     'lottery_id'          => (int) $lotteryId,
@@ -9303,6 +9489,35 @@ $row = (object) [
 
     // CHG: Persist digit probabilities for Pick3/Pick4/Daily games
     'digit_probabilities' => !empty($digitProbsJson) ? $digitProbsJson : null,
+
+    // [[SKAI_DISPLAY_SYNC]] Structured display/save fields for render parity
+    'save_schema_version'            => 2,
+    'prediction_family'              => $isDailyGamePosted ? 'daily' : 'regular',
+    'prediction_type'                => $__predType,
+    'render_mode'                    => $isDailyGamePosted ? 'daily_combos' : 'regular_main_extra',
+    'main_display_json'              => !empty($mainArr) ? json_encode(array_values($mainArr), JSON_UNESCAPED_SLASHES) : null,
+    'extra_display_json'             => !empty($extraArr) ? json_encode(array_values($extraArr), JSON_UNESCAPED_SLASHES) : null,
+    'canonical_main_display'         => ($mainCsv !== '') ? (string)$mainCsv : null,
+    'canonical_extra_display'        => !empty($extraCsv) ? (string)$extraCsv : null,
+    'prediction_extra_display_count' => !empty($extraArr) ? count($extraArr) : 0,
+    'regular_main_numbers_json'      => (!$isDailyGamePosted && !empty($mainArr)) ? json_encode(array_values($mainArr), JSON_UNESCAPED_SLASHES) : null,
+    'regular_extra_numbers_json'     => (!$isDailyGamePosted && !empty($extraArr)) ? json_encode(array_values($extraArr), JSON_UNESCAPED_SLASHES) : null,
+    'daily_pick_size'                => $__dailyPickSizeRow,
+    'daily_primary_prediction'       => $__dailyPrimPredRow,
+    'daily_primary_prediction_json'  => $__dailyPrimPredDigits,
+    'daily_top_picks_json'           => $__dailyTopPicksRow,
+    'daily_top_pick_strings_json'    => $__dailyTopPickStrRow,
+    'daily_bonus_digits_json'        => $__dailyBonusDigRow,
+    'daily_influential_digits_json'  => $__dailyInflDigRow,
+    'daily_display_payload_json'     => $__dailyDispPayload,
+    'daily_learning_payload_json'    => $__dailyLearnPayload,
+    'renderer_hint'                  => $isDailyGamePosted ? 'daily_combos' : 'regular_balls',
+    'display_variant'                => $isDailyGamePosted
+        ? ('daily_' . ($__predType !== 'daily' ? $__predType : 'pick'))
+        : ($__predType !== 'regular' ? $__predType : 'regular_lottery'),
+    'canonical_display_string'       => $isDailyGamePosted
+        ? ('Pick ' . (string)($__dailyPickSizeRow ?: '?') . ' - Top 5 Combos' . (!empty($extraArr) ? ' + Bonus' : ''))
+        : (count($mainArr) . ' main' . (!empty($extraArr) ? ' + ' . count($extraArr) . ' bonus' : '')),
 ];
 
         // Normalize: convert empty strings to NULL to avoid '' in nullable columns
@@ -9328,6 +9543,11 @@ $row = (object) [
             }
             if (isset($row->game_id)) {
                 unset($row->game_id); // prevent 1054 from unknown column in this table
+            }
+
+            // [[SKAI_DISPLAY_SYNC]] Ensure new structured columns exist before whitelist filter
+            if (function_exists('skaiEnsureUserSavedNumbersCols')) {
+                skaiEnsureUserSavedNumbersCols();
             }
 
             // 2) Whitelist from live DB schema to avoid unknown columns (e.g., game_id)
@@ -12830,7 +13050,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_set']) && !defin
 
         // Picks
         $main  = (array) $in->get('main_numbers', [], 'ARRAY');
-        $extra = (array) $in->get('extra_ball_numbers', [], 'ARRAY');
+        $extra = array();
+        $__extraRawLeg = (string) $in->get('extra_ball_numbers', '', 'RAW');
+        if ($__extraRawLeg !== '') {
+            $__extraDecLeg = json_decode($__extraRawLeg, true);
+            if (is_array($__extraDecLeg)) {
+                $extra = $__extraDecLeg;
+            } else {
+                $extra = array_values(array_filter(preg_split('/\s*,\s*/', $__extraRawLeg), static function($v){ return $v !== ''; }));
+            }
+        }
         $mainRawPosted = (string) $in->get('main_numbers', '', 'RAW');
         if ($mainRawPosted !== '') {
             $mainDecodedPosted = json_decode($mainRawPosted, true);
@@ -13247,6 +13476,103 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_set']) && !defin
             // Timestamps (legacy installs)
             'created_at'        => $now,
             'updated_at'        => $now,
+
+            // [[SKAI_DISPLAY_SYNC]] Structured display fields (legacy handler)
+            'save_schema_version'            => 2,
+            'prediction_family'              => $isDailyGamePosted ? 'daily' : 'regular',
+            'prediction_type'                => (function() use ($isDailyGamePosted, $lotteryConfig, $cfgPickPosted, $main) {
+                $ln = strtolower((string)($lotteryConfig['lotteryName'] ?? $lotteryConfig['lottery_name'] ?? ''));
+                if (strpos($ln, 'powerball') !== false) { return 'powerball'; }
+                if (strpos($ln, 'euro') !== false && strpos($ln, 'million') !== false) { return 'euromillions'; }
+                if ($isDailyGamePosted) {
+                    $ps = (int)$cfgPickPosted ?: count((array)$main);
+                    if ($ps === 3) { return 'pick3'; }
+                    if ($ps === 4) { return 'pick4'; }
+                    if ($ps === 5) { return 'pick5'; }
+                    return 'daily';
+                }
+                return 'regular';
+            })(),
+            'render_mode'                    => $isDailyGamePosted ? 'daily_combos' : 'regular_main_extra',
+            'main_display_json'              => !empty($main) ? json_encode(array_values((array)$main), JSON_UNESCAPED_SLASHES) : null,
+            'extra_display_json'             => !empty($extra) ? json_encode(array_values((array)$extra), JSON_UNESCAPED_SLASHES) : null,
+            'canonical_main_display'         => $isDailyGamePosted ? (($isDailyGamePosted && isset($dailyComboStrings) && !empty($dailyComboStrings)) ? implode(',', $dailyComboStrings) : null) : (!empty($main) ? implode(',', array_values((array)$main)) : null),
+            'canonical_extra_display'        => !empty($extra) ? implode(',', array_values((array)$extra)) : null,
+            'prediction_extra_display_count' => !empty($extra) ? count((array)$extra) : 0,
+            'daily_pick_size'                => $isDailyGamePosted ? ((int)$cfgPickPosted ?: null) : null,
+            'daily_primary_prediction'       => ($isDailyGamePosted && isset($dailyComboStrings) && !empty($dailyComboStrings)) ? (string)$dailyComboStrings[0] : null,
+            'daily_primary_prediction_json'  => (function() use ($isDailyGamePosted, $dailyComboStrings) {
+                if (!$isDailyGamePosted || !isset($dailyComboStrings) || empty($dailyComboStrings)) { return null; }
+                $ds = (string)$dailyComboStrings[0];
+                preg_match_all('/\d/', $ds, $__m);
+                return !empty($__m[0]) ? json_encode(array_map('intval', $__m[0]), JSON_UNESCAPED_SLASHES) : null;
+            })(),
+            'daily_top_picks_json'           => ($isDailyGamePosted && isset($dailyComboStrings) && !empty($dailyComboStrings)) ? json_encode(array_values($dailyComboStrings), JSON_UNESCAPED_SLASHES) : null,
+            'daily_top_pick_strings_json'    => (function() use ($isDailyGamePosted, $dailyComboStrings, $extra) {
+                if (!$isDailyGamePosted || !isset($dailyComboStrings) || empty($dailyComboStrings)) { return null; }
+                $extraArr = is_array($extra) ? array_values(array_map('intval', $extra)) : array();
+                if (!empty($extraArr)) {
+                    $bonusDisp = array_map(static function($n) { $n=(int)$n; return ($n>=0&&$n<=9)?('0'.$n):(string)$n; }, $extraArr);
+                    $suffix    = ' + Bonus ' . implode(' ', $bonusDisp);
+                    return json_encode(array_map(static function($s) use ($suffix){ return $s . $suffix; }, array_values($dailyComboStrings)), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+                }
+                return json_encode(array_values($dailyComboStrings), JSON_UNESCAPED_SLASHES);
+            })(),
+            'daily_bonus_digits_json'        => ($isDailyGamePosted && !empty($extra)) ? json_encode(array_values(array_map('intval', (array)$extra)), JSON_UNESCAPED_SLASHES) : null,
+            'daily_influential_digits_json'  => ($isDailyGamePosted && isset($rankedDailyDigits) && !empty($rankedDailyDigits)) ? json_encode(array_values($rankedDailyDigits), JSON_UNESCAPED_SLASHES) : null,
+            'daily_display_payload_json'     => (function() use ($isDailyGamePosted, $cfgPickPosted, $dailyComboStrings, $extra, $rankedDailyDigits, $main) {
+                if (!$isDailyGamePosted) { return null; }
+                $pickSz = (int)$cfgPickPosted ?: count((array)$main);
+                $combos = (isset($dailyComboStrings) && is_array($dailyComboStrings)) ? array_values($dailyComboStrings) : array();
+                return json_encode(array(
+                    'pick_size'          => $pickSz ?: null,
+                    'primary_prediction' => !empty($combos) ? (string)$combos[0] : null,
+                    'top_picks'          => $combos,
+                    'bonus_digits'       => !empty($extra) ? array_values(array_map('intval', (array)$extra)) : array(),
+                    'influential_digits' => (isset($rankedDailyDigits) && is_array($rankedDailyDigits)) ? array_values($rankedDailyDigits) : array(),
+                    'schema_version'     => 2,
+                ), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            })(),
+            'daily_learning_payload_json'    => (function() use ($isDailyGamePosted, $cfgPickPosted, $dailyComboStrings, $extra, $rankedDailyDigits, $main) {
+                if (!$isDailyGamePosted) { return null; }
+                $pickSz = (int)$cfgPickPosted ?: count((array)$main);
+                $combos = (isset($dailyComboStrings) && is_array($dailyComboStrings)) ? array_values($dailyComboStrings) : array();
+                $primaryStr    = !empty($combos) ? (string)$combos[0] : '';
+                preg_match_all('/\d/', $primaryStr, $__dm);
+                $primaryDigits = !empty($__dm[0]) ? array_map('intval', $__dm[0]) : array();
+                return json_encode(array(
+                    'pick_size'            => $pickSz ?: null,
+                    'primary_prediction'   => !empty($combos) ? (string)$combos[0] : null,
+                    'top_picks'            => $combos,
+                    'ranked_digits'        => (isset($rankedDailyDigits) && is_array($rankedDailyDigits)) ? array_values($rankedDailyDigits) : array(),
+                    'bonus_digits'         => !empty($extra) ? array_values(array_map('intval', (array)$extra)) : array(),
+                    'primary_combo_digits' => $primaryDigits,
+                    'schema_version'       => 2,
+                ), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            })(),
+            'regular_main_numbers_json'      => (!$isDailyGamePosted && !empty($main)) ? json_encode(array_values((array)$main), JSON_UNESCAPED_SLASHES) : null,
+            'regular_extra_numbers_json'     => (!$isDailyGamePosted && !empty($extra)) ? json_encode(array_values((array)$extra), JSON_UNESCAPED_SLASHES) : null,
+            'renderer_hint'                  => $isDailyGamePosted ? 'daily_combos' : 'regular_balls',
+            'display_variant'                => (function() use ($isDailyGamePosted, $cfgPickPosted, $lotteryConfig, $main) {
+                $ln = strtolower((string)($lotteryConfig['lotteryName'] ?? $lotteryConfig['lottery_name'] ?? ''));
+                if (strpos($ln, 'powerball') !== false) { return 'powerball'; }
+                if (strpos($ln, 'euro') !== false && strpos($ln, 'million') !== false) { return 'euromillions'; }
+                if ($isDailyGamePosted) {
+                    $ps = (int)$cfgPickPosted ?: count((array)$main);
+                    return 'daily_pick' . ($ps ?: '');
+                }
+                return 'regular_lottery';
+            })(),
+            'canonical_display_string'       => (function() use ($isDailyGamePosted, $cfgPickPosted, $dailyComboStrings, $extra, $main) {
+                if ($isDailyGamePosted) {
+                    $ps = (int)$cfgPickPosted ?: count((array)$main);
+                    $suffix = !empty($extra) ? ' + Bonus' : '';
+                    return 'Pick ' . ($ps ?: '?') . ' - Top 5 Combos' . $suffix;
+                }
+                $mc = count((array)$main);
+                $ec = count((array)$extra);
+                return $mc . ' main' . ($ec > 0 ? ' + ' . $ec . ' bonus' : '');
+            })(),
         ];
         $insert = [];
         foreach ($columns as $c => $v) {
@@ -22253,12 +22579,12 @@ function buildPayload(){
         var _fpsSets = [];
         for (var _fi2 = 0; _fi2 < _fps.length; _fi2++) {
           var _bpMain = Array.isArray(_fps[_fi2].main) ? _fps[_fi2].main : (Array.isArray(_fps[_fi2].values) ? _fps[_fi2].values : []);
-          _fpsSets.push({ rank: _fps[_fi2].rank, values: _bpMain.slice(), score: _fps[_fi2].score, display: (((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_bpMain, _pick) : _bpMain.join('')) });
+          _fpsSets.push({ rank: _fps[_fi2].rank, values: _bpMain.slice(), score: _fps[_fi2].score, display: ((_isDigitEvidence && (window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_bpMain, _pick) : _bpMain.join(',')) });
         }
         // CHG: Build aiPredictedNumbers (display-string form) – the canonical save key.
         var _bpAiPN = [];
         for (var _bpk = 0; _bpk < _fpsSets.length; _bpk++) {
-          var _bpDisp = _fpsSets[_bpk].display || (_fpsSets[_bpk].values ? window.SKAI_formatDailyComboDisplay(_fpsSets[_bpk].values, _pick) : '');
+          var _bpDisp = _fpsSets[_bpk].display || (_fpsSets[_bpk].values ? (_isDigitEvidence ? window.SKAI_formatDailyComboDisplay(_fpsSets[_bpk].values, _pick) : _fpsSets[_bpk].values.join(',')) : '');
           _bpAiPN.push({ rank: _fpsSets[_bpk].rank, values: _bpDisp, score: _fpsSets[_bpk].score, display: _bpDisp });
         }
         evidence.aiPredictedNumbers      = _bpAiPN;
@@ -22804,7 +23130,7 @@ function buildPayload(){
             var _wsets = [];
             for (var _wi = 0; _wi < _wfps.length; _wi++) {
               var _wMain = Array.isArray(_wfps[_wi].main) ? _wfps[_wi].main : (Array.isArray(_wfps[_wi].values) ? _wfps[_wi].values : []);
-              _wsets.push({ rank: _wfps[_wi].rank, values: _wMain.slice(), score: _wfps[_wi].score, display: (((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_wMain, ((window.SKAI_META && +window.SKAI_META.pick) || _wMain.length)) : _wMain.join('')) });
+              _wsets.push({ rank: _wfps[_wi].rank, values: _wMain.slice(), score: _wfps[_wi].score, display: ((_isDigitEvidence && (window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_wMain, ((window.SKAI_META && +window.SKAI_META.pick) || _wMain.length)) : _wMain.join(',')) });
             }
             evd.final_prediction_sets      = _wsets;
             evd.final_prediction_set_count = _wsets.length;
@@ -22813,7 +23139,7 @@ function buildPayload(){
             // CHG: Also build aiPredictedNumbers from the same sets.
             var _wPN = [];
             for (var _wPk = 0; _wPk < _wsets.length; _wPk++) {
-              var _wPDisp = _wsets[_wPk].display || (_wsets[_wPk].values ? ((((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_wsets[_wPk].values, ((window.SKAI_META && +window.SKAI_META.pick) || 0)) : _wsets[_wPk].values.join(''))) : '');
+              var _wPDisp = _wsets[_wPk].display || (_wsets[_wPk].values ? ((_isDigitEvidence && (window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_wsets[_wPk].values, ((window.SKAI_META && +window.SKAI_META.pick) || 0)) : _wsets[_wPk].values.join(',')) : '');
               _wPN.push({ rank: _wsets[_wPk].rank, values: _wPDisp, score: _wsets[_wPk].score, display: _wPDisp });
             }
             evd.aiPredictedNumbers      = _wPN;
@@ -31907,7 +32233,7 @@ function fmt(v){
             if (_njEntry) {
               var _njMain = Array.isArray(_njEntry.main) ? _njEntry.main : (Array.isArray(_njEntry.values) ? _njEntry.values : []);
               if (_njMain.length) {
-                var _njDisp = ((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_njMain, ((window.SKAI_META && +window.SKAI_META.pick) || _njMain.length)) : _njMain.join('');
+                var _njDisp = ((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_njMain, ((window.SKAI_META && +window.SKAI_META.pick) || _njMain.length)) : _njMain.join(',');
                 _njPsets.push({ rank: _njEntry.rank, values: _njDisp, score: (typeof _njEntry.score === 'number' ? _njEntry.score : 0), display: _njDisp });
               }
             }
@@ -31938,7 +32264,7 @@ function fmt(v){
               var _fps2Sets = _fps2Chk.final_prediction_sets;
               var _aiPN2 = [];
               for (var _ai2k = 0; _ai2k < _fps2Sets.length; _ai2k++) {
-                var _ai2Disp = _fps2Sets[_ai2k].display || (_fps2Sets[_ai2k].values ? (((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_fps2Sets[_ai2k].values, ((window.SKAI_META && +window.SKAI_META.pick) || 0)) : (_fps2Sets[_ai2k].values.join ? _fps2Sets[_ai2k].values.join('') : String(_fps2Sets[_ai2k].values))) : '');
+                var _ai2Disp = _fps2Sets[_ai2k].display || (_fps2Sets[_ai2k].values ? (((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_fps2Sets[_ai2k].values, ((window.SKAI_META && +window.SKAI_META.pick) || 0)) : (_fps2Sets[_ai2k].values.join ? _fps2Sets[_ai2k].values.join(',') : String(_fps2Sets[_ai2k].values))) : '');
                 _aiPN2.push({ rank: _fps2Sets[_ai2k].rank, values: _ai2Disp, score: _fps2Sets[_ai2k].score, display: _ai2Disp });
               }
               _fps2Chk.aiPredictedNumbers      = _aiPN2;
@@ -31953,12 +32279,12 @@ function fmt(v){
           var _fpsSets2 = [];
           for (var _fi3 = 0; _fi3 < _fps2.length; _fi3++) {
             var _fps2Main = Array.isArray(_fps2[_fi3].main) ? _fps2[_fi3].main : (Array.isArray(_fps2[_fi3].values) ? _fps2[_fi3].values : []);
-            _fpsSets2.push({ rank: _fps2[_fi3].rank, values: _fps2Main.slice(), score: _fps2[_fi3].score, display: (((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_fps2Main, ((window.SKAI_META && +window.SKAI_META.pick) || _fps2Main.length)) : _fps2Main.join('')) });
+            _fpsSets2.push({ rank: _fps2[_fi3].rank, values: _fps2Main.slice(), score: _fps2[_fi3].score, display: (((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_fps2Main, ((window.SKAI_META && +window.SKAI_META.pick) || _fps2Main.length)) : _fps2Main.join(',')) });
           }
           // CHG: Build aiPredictedNumbers (display-string form) alongside final_prediction_sets (array form).
           var _aiPN3 = [];
           for (var _ai3k = 0; _ai3k < _fpsSets2.length; _ai3k++) {
-            var _ai3Disp = _fpsSets2[_ai3k].display || (_fpsSets2[_ai3k].values ? (((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_fpsSets2[_ai3k].values, ((window.SKAI_META && +window.SKAI_META.pick) || 0)) : _fpsSets2[_ai3k].values.join('')) : '');
+            var _ai3Disp = _fpsSets2[_ai3k].display || (_fpsSets2[_ai3k].values ? (((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_fpsSets2[_ai3k].values, ((window.SKAI_META && +window.SKAI_META.pick) || 0)) : _fpsSets2[_ai3k].values.join(',')) : '');
             _aiPN3.push({ rank: _fpsSets2[_ai3k].rank, values: _ai3Disp, score: _fpsSets2[_ai3k].score, display: _ai3Disp });
           }
           var _meta2 = window.SKAI_META || {};
@@ -38214,6 +38540,14 @@ try {
     }
     if (window.SKAI_lastScoreByNum) window.SKAI_lastScoreByNum[String(num)] = score;
 
+    // DETERMINISTIC: Main-ball scores are kept noise-free so the same model state and
+    // settings always produce the same SKAI_TOP_MAIN ranking (reproducible learning).
+    // Within-run FPS diversity (5 structurally different combo suggestions per run) is
+    // handled deterministically by the FPS selection loop in SKAI_scoreAndRender, which
+    // enforces ≥2 ball difference between each FPS entry without any Math.random().
+    // Cross-run diversity (different batch profile/strategy combos) comes from genuinely
+    // different neural-network weights, blend, temperature, and TS factor — not from noise.
+
     blended.push({
       num: num,
       score: score,
@@ -38309,7 +38643,11 @@ try {
                         ? settings.blend
                         : undefined,
           mainLimit:  20,
-          extraLimit: !!(window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame)) ? 3 : 5
+          // FIX2: Use isStandardLotteryGame (domain>9) as discriminant, not hasExtraBall.
+          // Pick4 with bonus digit: isDailyDigitGame=true, hasExtraBall=true, isStandardLotteryGame=false → 3
+          // EuroMillions/Powerball (even if wrongly tagged is_daily): isStandardLotteryGame=true → 5
+          extraLimit: !!(window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame)
+                          && !window.SKAI_META.isStandardLotteryGame) ? 3 : 5
         }
       };
       window.SKAI_BLEND_RESULTS = window.SKAI_blendEngine.run(blendInput);
@@ -38378,22 +38716,82 @@ try {
             var _metaFC = window.SKAI_META || {};
             var _pickFC = parseInt(_metaFC.pick, 10);
             if (!_pickFC || _pickFC < 1) { _pickFC = (lastPicks && lastPicks.length) ? lastPicks.length : 5; }
-            var _extraCountFC = (_metaFC && _metaFC.hasExtraBall) ? (parseInt(_metaFC.extraCount || _metaFC.extra_ball_count || _metaFC.num_extra_balls_drawn || 1, 10) || 1) : 0;
-            window.SKAI_buildFinalCombos({ pickSize: _pickFC, extraCount: _extraCountFC, topK: 12, limit: 25 });
+            // FIX: Always predict at least 5 extra numbers for regular lotteries with an extra
+            // ball (e.g. EuroMillions Lucky Stars, Powerball). The official draw count is the
+            // minimum required per official rules, but SKAI shows the top-5 most probable picks
+            // regardless of how many are officially drawn.
+            var _extraCountFC = (_metaFC && _metaFC.hasExtraBall) ? Math.max(5, parseInt(_metaFC.extraCount || _metaFC.extra_ball_count || _metaFC.num_extra_balls_drawn || 1, 10) || 1) : 0;
+            // FIX-D: topK 12→20 — use all 20 balls from SKAI_TOP_MAIN (C(20,5)=15504
+            // candidates vs C(12,5)=792).  For large-domain games (Powerball 69, EuroMillions
+            // 50) the extra pool breadth is needed so diversity enforcement below can find
+            // genuinely different combos; for small-domain games it is harmless.
+            // FIX-E: limit 25→100 — keep top 100 ranked combos available so the
+            // diversity-aware FPS selection (Fix F below) has enough candidates to choose
+            // 5 entries that each differ by ≥2 balls.  With limit=25, the first combo
+            // differing by ≥2 balls from FPS[0] is often beyond position 37 (because
+            // 36 combos share ≥4 balls with the top pick) and was never reachable.
+            window.SKAI_buildFinalCombos({ pickSize: _pickFC, extraCount: _extraCountFC, topK: 20, limit: 100 });
           }
           if (window.SKAI_FINAL_COMBOS && window.SKAI_FINAL_COMBOS.length) {
             window.SKAI_BEST_COMBO = window.SKAI_FINAL_COMBOS[0] || null;
+            // FIX-F: Diversity-aware FPS selection.
+            // Problem: With limit=25 and no diversity check, the top 5 combos
+            // from C(12,5)=792 all share the same 4 highest-scoring balls and
+            // only vary in 1 position.  For large-domain games (Powerball 69,
+            // EuroMillions 50) the ML distribution is nearly flat so those 4 balls
+            // dominate ALL 25 candidates.  Users see "same numbers" in all 5 slots.
+            //
+            // Fix: First pass selects combos that differ by ≥2 balls from every
+            // already-selected FPS entry (max shared = pickSize-2).  Second pass
+            // fills any remaining slots without the constraint so we always emit 5.
+            var _fpsDivPickSize = _pickFC || 5;
+            var _fpsDivMaxShared = Math.max(1, _fpsDivPickSize - 2); // ≥2 ball difference
+            var _fpsPass2Needed = false;
             for (var _fj = 0; _fj < window.SKAI_FINAL_COMBOS.length && _fps.length < 5; _fj++) {
               var _fc = window.SKAI_FINAL_COMBOS[_fj];
-              if (_fc && Array.isArray(_fc.main) && _fc.main.length > 0) {
-                _fps.push({
-                  rank:  _fps.length + 1,
-                  main:  _fc.main.slice(),
-                  extra: (_fc.extra && Array.isArray(_fc.extra)) ? _fc.extra.slice() : [],
-                  score: (typeof _fc.score === 'number') ? _fc.score : 0,
-                  approxPct: 0,
-                  source: 'final_combos'
-                });
+              if (!_fc || !Array.isArray(_fc.main) || !_fc.main.length) { continue; }
+              var _fcMain = _fc.main;
+              var _tooSimilar = false;
+              for (var _prevFps = 0; _prevFps < _fps.length; _prevFps++) {
+                var _prevMain = _fps[_prevFps].main;
+                var _sharedCount = 0;
+                for (var _bk = 0; _bk < _fcMain.length; _bk++) {
+                  for (var _pk = 0; _pk < _prevMain.length; _pk++) {
+                    if (_fcMain[_bk] === _prevMain[_pk]) { _sharedCount++; break; }
+                  }
+                }
+                if (_sharedCount > _fpsDivMaxShared) { _tooSimilar = true; break; }
+              }
+              if (_tooSimilar) { _fpsPass2Needed = true; continue; }
+              _fps.push({
+                rank:  _fps.length + 1,
+                main:  _fcMain.slice(),
+                extra: (_fc.extra && Array.isArray(_fc.extra)) ? _fc.extra.slice() : [],
+                score: (typeof _fc.score === 'number') ? _fc.score : 0,
+                approxPct: 0,
+                source: 'final_combos'
+              });
+            }
+            // Second pass: fill remaining slots without diversity constraint so we
+            // always emit exactly 5 FPS entries even if the pool is too concentrated.
+            if (_fpsPass2Needed && _fps.length < 5) {
+              for (var _fj2 = 0; _fj2 < window.SKAI_FINAL_COMBOS.length && _fps.length < 5; _fj2++) {
+                var _fc2 = window.SKAI_FINAL_COMBOS[_fj2];
+                if (!_fc2 || !Array.isArray(_fc2.main) || !_fc2.main.length) { continue; }
+                var _alreadyInFps = false;
+                for (var _exi = 0; _exi < _fps.length; _exi++) {
+                  if (_fps[_exi].main.join(',') === _fc2.main.join(',')) { _alreadyInFps = true; break; }
+                }
+                if (!_alreadyInFps) {
+                  _fps.push({
+                    rank:  _fps.length + 1,
+                    main:  _fc2.main.slice(),
+                    extra: (_fc2.extra && Array.isArray(_fc2.extra)) ? _fc2.extra.slice() : [],
+                    score: (typeof _fc2.score === 'number') ? _fc2.score : 0,
+                    approxPct: 0,
+                    source: 'final_combos'
+                  });
+                }
               }
             }
           }
@@ -38422,13 +38820,18 @@ try {
             for (var _fk = 0; _fk < _fps.length; _fk++) {
               // CHG: main||values fallback so batch-restored entries (which use .values) work too
               var _fkMain = Array.isArray(_fps[_fk].main) ? _fps[_fk].main : (Array.isArray(_fps[_fk].values) ? _fps[_fk].values : []);
-              _fpsSets.push({ rank: _fps[_fk].rank, values: _fkMain.slice(), score: _fps[_fk].score, display: window.SKAI_formatDailyComboDisplay(_fkMain, _pickDigit || _fkMain.length) });
+              // [[SKAI_DISPLAY_SYNC]] For regular lotteries (EuroMillions, Powerball, etc.) the
+              // display field must use comma-joined notation ("1,7,14,25,36"), NOT the daily
+              // last-digit-concat format ("17456") produced by SKAI_formatDailyComboDisplay.
+              // Using the wrong format here causes mylottoexpertExtractDailySavedView to
+              // misidentify regular-lottery rows as daily and render them incorrectly.
+              _fpsSets.push({ rank: _fps[_fk].rank, values: _fkMain.slice(), score: _fps[_fk].score, display: _isDigitGame ? window.SKAI_formatDailyComboDisplay(_fkMain, _pickDigit || _fkMain.length) : _fkMain.join(',') });
             }
             // CHG: Build aiPredictedNumbers (canonical display-string form of the ranked sets).
             // This is the primary save key the dashboard and save pipeline read.
             var _aiPN = [];
             for (var _apk = 0; _apk < _fpsSets.length; _apk++) {
-              var _apDisp = _fpsSets[_apk].display || (_fpsSets[_apk].values ? window.SKAI_formatDailyComboDisplay(_fpsSets[_apk].values, _pickDigit || 0) : '');
+              var _apDisp = _fpsSets[_apk].display || (_fpsSets[_apk].values ? (_isDigitGame ? window.SKAI_formatDailyComboDisplay(_fpsSets[_apk].values, _pickDigit || 0) : _fpsSets[_apk].values.join(',')) : '');
               _aiPN.push({ rank: _fpsSets[_apk].rank, values: _apDisp, score: _fpsSets[_apk].score, display: _apDisp });
             }
             var _fpsPayload = {
@@ -38929,7 +39332,11 @@ window.SKAI_runExtra = function runExtraBallML(settings) {
               return (b.score - a.score) || (a.num - b.num);
             });
 
-            var maxExtra = !!(meta && (meta.isDaily || meta.isDailyDigitGame)) ? 3 : 5;
+            // FIX2: Use isStandardLotteryGame (domain>9) as discriminant.
+            // Standard lottery + extra ball (Powerball, EuroMillions even if wrongly tagged daily) → 5.
+            // Daily digit game + bonus digit (Pick3/4/5 bonus, domain≤9) → 3.
+            var maxExtra = !!(meta && meta.isStandardLotteryGame && meta.hasExtraBall) ? 5
+              : !!(meta && (meta.isDaily || meta.isDailyDigitGame)) ? 3 : 5;
             var topX = blendedX.slice(0, Math.min(blendedX.length, maxExtra));
 
             SKAI_assert(
@@ -39155,7 +39562,9 @@ if (isDailyGame) {
 }
 
 // Extra balls: only render if the game actually has an extra ball
-var topX = (hasExtra ? topXAll.slice(0, isDailyGame ? 3 : 5) : []);
+// FIX2: Use isStandardLotteryGame to cap: daily-digit games (Pick3/4/5, domain≤9) always 3;
+// standard lotteries with extra ball (Powerball/EuroMillions, domain>9) always 5.
+var topX = (hasExtra ? topXAll.slice(0, (!!(window.SKAI_META && window.SKAI_META.isStandardLotteryGame) ? 5 : (isDailyGame ? 3 : 5))) : []);
 
 syncTopLimitControls(limit);
 
@@ -39467,7 +39876,7 @@ try {
         var a = document.createElement('span');
         a.style.fontWeight = '700';
         a.style.color = '#0A1A33';
-        a.textContent = (((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(it.main, ((window.SKAI_META && +window.SKAI_META.pick) || it.main.length)) : it.main.join(''));
+        a.textContent = (((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(it.main, ((window.SKAI_META && +window.SKAI_META.pick) || it.main.length)) : it.main.join(', '));
 
         var b = document.createElement('span');
         b.style.color = '#7F8DAA';
@@ -39544,7 +39953,9 @@ try {
               aiX.appendChild(lab);
 
             var frag2 = document.createDocumentFragment();
-            var _txLimit = isDailyGame ? 3 : 5;
+            // FIX2: Use isStandardLotteryGame (domain>9): daily-digit games cap at 3 regardless
+            // of hasExtra; standard lotteries always get 5 even if wrongly tagged as is_daily.
+            var _txLimit = (!!(window.SKAI_META && window.SKAI_META.isStandardLotteryGame) ? 5 : (isDailyGame ? 3 : 5));
             for (var tx=0; tx<topXr.length && tx<_txLimit; tx++){
               var itemX = topXr[tx];
 
@@ -39674,14 +40085,18 @@ try {
           var br = window.SKAI_BLEND_RESULTS || null;
           var pool = [];
 
-          // Prefer blend engine top list if available
-          if (br && Array.isArray(br.topMain) && br.topMain.length){
-            for (var i=0;i<br.topMain.length && pool.length<topK;i++){
-              pool.push(br.topMain[i].number);
-            }
-          } else if (Array.isArray(window.SKAI_TOP_MAIN) && window.SKAI_TOP_MAIN.length){
+          // FIX: Prefer SKAI_TOP_MAIN (from blended[], which includes per-run diversity noise
+          // applied in SKAI_scoreAndRender) over SKAI_BLEND_RESULTS.topMain (built from raw
+          // mainMlMap without diversity noise).  Without this, all 9 batch combos use the
+          // same noise-free ranking and produce identical top picks for large-domain games
+          // (Powerball 69 balls, EuroMillions 50 balls).
+          if (Array.isArray(window.SKAI_TOP_MAIN) && window.SKAI_TOP_MAIN.length){
             for (var j=0;j<window.SKAI_TOP_MAIN.length && pool.length<topK;j++){
               pool.push(window.SKAI_TOP_MAIN[j].num);
+            }
+          } else if (br && Array.isArray(br.topMain) && br.topMain.length){
+            for (var i=0;i<br.topMain.length && pool.length<topK;i++){
+              pool.push(br.topMain[i].number);
             }
           }
 
@@ -39762,32 +40177,55 @@ try {
           return results;
         }
 
-        // Score a combo using blended evidence if available
+        // Score a combo using SKAI_TOP_MAIN scores (which include per-run diversity noise)
+        // FIX: The previous implementation used sum(ball_numbers) as the primary key, which
+        // is deterministic and ignores ML predictions entirely.  This caused identical combos
+        // across all 9 batch runs because the sort order was always "highest-numbered balls".
+        // Now we use the ML probability scores from SKAI_TOP_MAIN (set by SKAI_scoreAndRender
+        // AFTER applying diversity noise) so each batch run picks a legitimately different combo.
         function scoreCombo(combo){
-          var base = 0;
-          for (var i=0;i<combo.length;i++){
-            base += combo[i]; // neutral base tie-breaker (stable ordering)
-          }
-
+          // Primary: use SKAI_TOP_MAIN scores (includes diversity noise from this run)
           try {
-            var br = window.SKAI_BLEND_RESULTS || null;
-            var map = br && br.mainMap ? br.mainMap : null;
-            if (!map) return base;
-
-            var lift = 0;
-            for (var j=0;j<combo.length;j++){
-              var n = combo[j];
-              if (map[n] && typeof map[n].score === 'number'){
-                lift += map[n].score;
+            var mainMap = {};
+            if (Array.isArray(window.SKAI_TOP_MAIN) && window.SKAI_TOP_MAIN.length) {
+              for (var k = 0; k < window.SKAI_TOP_MAIN.length; k++) {
+                var item = window.SKAI_TOP_MAIN[k];
+                if (item && item.num != null && typeof item.score === 'number') {
+                  mainMap[item.num] = item.score;
+                }
               }
             }
-            lift = lift / combo.length;
+            var scoreSum = 0;
+            var matched = 0;
+            for (var i = 0; i < combo.length; i++) {
+              var s = mainMap[combo[i]];
+              if (typeof s === 'number' && isFinite(s)) { scoreSum += s; matched++; }
+            }
+            if (matched === combo.length && scoreSum > 0) {
+              return scoreSum / combo.length;
+            }
+          } catch(_){}
 
-            // light influence to preserve your existing behavior shape
-            return base + (lift * 0.15);
-          } catch(_){
-            return base;
-          }
+          // Fallback: blend map (no diversity noise but better than sum(numbers))
+          try {
+            var br = window.SKAI_BLEND_RESULTS || null;
+            var blendMap = br && br.mainMap ? br.mainMap : null;
+            if (blendMap) {
+              var lift = 0;
+              for (var j = 0; j < combo.length; j++) {
+                var n = combo[j];
+                if (blendMap[n] && typeof blendMap[n].score === 'number') {
+                  lift += blendMap[n].score;
+                }
+              }
+              return lift / combo.length;
+            }
+          } catch(_){}
+
+          // Last resort: stable tie-breaker (sum of numbers divided by pick count)
+          var base = 0;
+          for (var b = 0; b < combo.length; b++) { base += combo[b]; }
+          return base / (combo.length || 1);
         }
 
         function buildExtraSelection(mainCombo, extraRows, extraCount, comboIndex, limit){
@@ -40027,7 +40465,11 @@ try {
           }
 
           var frag2 = document.createDocumentFragment();
-          var _txLimitR = !!(window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame)) ? 3 : 5;
+          // FIX2: Use isStandardLotteryGame (domain>9) as discriminant.
+          // Daily-digit games (Pick3/4/5, domain≤9) cap at 3 regardless of hasExtraBall.
+          // Standard lotteries (Powerball/EuroMillions, domain>9) always show 5.
+          var _txLimitR = !!(window.SKAI_META && window.SKAI_META.isStandardLotteryGame) ? 5
+            : !!(window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame)) ? 3 : 5;
           for (var tx = 0; tx < topX.length && tx < _txLimitR; tx++){
             var itemX = topX[tx];
             var numX  = itemX && itemX.num;
@@ -40060,6 +40502,56 @@ try {
               window.SKAI_renderExtras();
             }
           } catch(_){}
+          // FIX: Patch SKAI_FINAL_PREDICTION_SETS extras now that extra training has
+          // completed.  On the initial SKAI_buildFinalCombos call (inside
+          // SKAI_scoreAndRender), SKAI_TOP_EXTRA was still empty so all FPS entries
+          // carried extra:[].  We update them in-place here so captureResult() and the
+          // save pipeline receive the real trained extra picks (Powerball, EuroMillions, …).
+          try {
+            if (Array.isArray(window.SKAI_TOP_EXTRA) && window.SKAI_TOP_EXTRA.length &&
+                window.SKAI_META && window.SKAI_META.hasExtraBall) {
+              var _patchExtras = [];
+              for (var _pex = 0; _pex < window.SKAI_TOP_EXTRA.length && _patchExtras.length < 5; _pex++) {
+                var _pexEntry = window.SKAI_TOP_EXTRA[_pex];
+                if (_pexEntry && _pexEntry.num != null) { _patchExtras.push(_pexEntry.num); }
+              }
+              if (_patchExtras.length && Array.isArray(window.SKAI_FINAL_PREDICTION_SETS)) {
+                for (var _fpsPatch = 0; _fpsPatch < window.SKAI_FINAL_PREDICTION_SETS.length; _fpsPatch++) {
+                  if (window.SKAI_FINAL_PREDICTION_SETS[_fpsPatch]) {
+                    window.SKAI_FINAL_PREDICTION_SETS[_fpsPatch].extra = _patchExtras.slice();
+                  }
+                }
+                // Re-serialize so captureResult() and the save pipeline get the patched extras.
+                try {
+                  var _patchedFpsJson = window.__SKAI_FPS_JSON__;
+                  if (_patchedFpsJson) {
+                    var _pObj = JSON.parse(_patchedFpsJson);
+                    if (_pObj && Array.isArray(_pObj.final_prediction_sets)) {
+                      for (var _pfk = 0; _pfk < _pObj.final_prediction_sets.length; _pfk++) {
+                        _pObj.final_prediction_sets[_pfk].extra = _patchExtras.slice();
+                      }
+                    }
+                    if (_pObj && Array.isArray(_pObj.top_5_prediction_sets)) {
+                      for (var _ptk = 0; _ptk < _pObj.top_5_prediction_sets.length; _ptk++) {
+                        _pObj.top_5_prediction_sets[_ptk].extra = _patchExtras.slice();
+                      }
+                    }
+                    if (_pObj && _pObj.primary_prediction_set) {
+                      _pObj.primary_prediction_set.extra = _patchExtras.slice();
+                    }
+                    window.__SKAI_FPS_JSON__ = JSON.stringify(_pObj);
+                    // Also update the hidden form fields
+                    try {
+                      var _pFpsFlds = document.querySelectorAll('input[name="top_combos_json"]');
+                      for (var _pfl = 0; _pfl < _pFpsFlds.length; _pfl++) {
+                        try { _pFpsFlds[_pfl].value = window.__SKAI_FPS_JSON__; } catch(_){}
+                      }
+                    } catch(_){}
+                  }
+                } catch(_) {}
+              }
+            }
+          } catch(_) {}
         });
       }
     } catch(_){}
@@ -40682,7 +41174,12 @@ try {
           : mainsArrDom;
       }
 
-      var _isDailyForExtra = !!(window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame));
+      // FIX2: Use isStandardLotteryGame (domain>9) to guard extra routing.
+      // Daily-digit games (Pick3/4/5, domain≤9): use SKAI_DAILY_EXTRA_DIGITS, cap at 3.
+      // Standard lotteries (Powerball/EuroMillions, domain>9): use SKAI_TOP_EXTRA, cap at 5.
+      // Using !hasExtraBall was wrong: Pick4 bonus has hasExtraBall=true but should go daily path.
+      var _isDailyForExtra = !!(window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame)
+        && !window.SKAI_META.isStandardLotteryGame);
       var _extraLimit = _isDailyForExtra ? 3 : 5;
       var extraArr = [];
       if (_isDailyForExtra) {
@@ -42260,8 +42757,12 @@ window.addEventListener('skai:render:done', function(){
     // If meta is missing, infer from common daily rule: presence of digits 0-9 in top list
     var top = (window.SKAI_TOP_MAIN && window.SKAI_TOP_MAIN.length) ? window.SKAI_TOP_MAIN : [];
 
-    // Gate: daily only - use meta.isDaily flag from config (consistent with rendering logic)
-    var isDaily = !!(meta && meta.isDaily);
+    // Gate: daily only - check both isDaily (JSON config flag) and isDailyDigitGame
+    // (computed from mainMax<=9 + no extra ball).  A Pick 3/4/5 game may have
+    // isDailyDigitGame=true even when the JSON config omits the "is_daily" key, so
+    // checking only meta.isDaily would skip the panel and leave SKAI_DAILY_CHOSEN_COMBOS
+    // empty, causing the batch save to store only the primary combo instead of all 5.
+    var isDaily = !!(meta && (meta.isDaily || meta.isDailyDigitGame));
 
     var panel = document.getElementById('skai-daily-panel');
     if (!panel) return;
@@ -48066,11 +48567,11 @@ document.addEventListener('DOMContentLoaded', function () {
         extraCount:           (function(){ var m = window.SKAI_META || {}; return ((m.extraCount || 0)|0); })(),
         comboCountSaved:      (function(){ var fps = window.SKAI_FINAL_PREDICTION_SETS; if (fps && fps.length) return fps.length|0; var c = window.SKAI_POS_COMBOS; return (c && c.length) ? (c.length|0) : 0; })(),
         top_combos:           (function(){ var fps = window.SKAI_FINAL_PREDICTION_SETS; if (fps && fps.length) { var out=[]; for (var i=0;i<fps.length&&i<5;i++){var m=Array.isArray(fps[i].main)?fps[i].main:(Array.isArray(fps[i].values)?fps[i].values:[]);out.push({rank:fps[i].rank,main:m.slice(),score:fps[i].score});} return out; } var c = window.SKAI_POS_COMBOS; return (c && c.length) ? c.slice(0, 5) : []; })(),
-        final_prediction_sets:(function(){ var fps = window.SKAI_FINAL_PREDICTION_SETS; if (fps && fps.length) { var out=[]; for (var i=0;i<fps.length;i++){var m=Array.isArray(fps[i].main)?fps[i].main:(Array.isArray(fps[i].values)?fps[i].values:[]);var d=(typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(m, ((window.SKAI_META && +window.SKAI_META.pick) || m.length)) : m.join('');out.push({rank:fps[i].rank,values:m.slice(),score:fps[i].score,display:d});} return out; } return []; })(),
+        final_prediction_sets:(function(){ var fps = window.SKAI_FINAL_PREDICTION_SETS; if (fps && fps.length) { var out=[]; for (var i=0;i<fps.length;i++){var m=Array.isArray(fps[i].main)?fps[i].main:(Array.isArray(fps[i].values)?fps[i].values:[]);var d=((window.SKAI_META&&window.SKAI_META.isDailyDigitGame)&&typeof window.SKAI_formatDailyComboDisplay==='function')?window.SKAI_formatDailyComboDisplay(m,((window.SKAI_META&&+window.SKAI_META.pick)||m.length)):m.join(',');out.push({rank:fps[i].rank,values:m.slice(),score:fps[i].score,display:d});} return out; } return []; })(),
         // CHG: aiPredictedNumbers - canonical display-string key matching the save payload format.
-        aiPredictedNumbers:   (function(){ var fps = window.SKAI_FINAL_PREDICTION_SETS; if (fps && fps.length) { var out=[]; for (var i=0;i<fps.length;i++){var m=Array.isArray(fps[i].main)?fps[i].main:(Array.isArray(fps[i].values)?fps[i].values:[]);var d=(typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(m, ((window.SKAI_META && +window.SKAI_META.pick) || m.length)) : m.join('');out.push({rank:fps[i].rank,values:d,score:fps[i].score,display:d});} return out; } return []; })(),
+        aiPredictedNumbers:   (function(){ var fps = window.SKAI_FINAL_PREDICTION_SETS; if (fps && fps.length) { var out=[]; for (var i=0;i<fps.length;i++){var m=Array.isArray(fps[i].main)?fps[i].main:(Array.isArray(fps[i].values)?fps[i].values:[]);var d=((window.SKAI_META&&window.SKAI_META.isDailyDigitGame)&&typeof window.SKAI_formatDailyComboDisplay==='function')?window.SKAI_formatDailyComboDisplay(m,((window.SKAI_META&&+window.SKAI_META.pick)||m.length)):m.join(',');out.push({rank:fps[i].rank,values:d,score:fps[i].score,display:d});} return out; } return []; })(),
         aiPredictedNumbersCount: (function(){ var fps = window.SKAI_FINAL_PREDICTION_SETS; return (fps && fps.length) ? fps.length|0 : 0; })(),
-        primaryPrediction:    (function(){ var fps = window.SKAI_FINAL_PREDICTION_SETS; if (fps && fps.length) { var m=Array.isArray(fps[0].main)?fps[0].main:(Array.isArray(fps[0].values)?fps[0].values:[]); var d=(typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(m, ((window.SKAI_META && +window.SKAI_META.pick) || m.length)) : m.join(''); return {rank:fps[0].rank,values:d,score:fps[0].score,display:d}; } return null; })(),
+        primaryPrediction:    (function(){ var fps = window.SKAI_FINAL_PREDICTION_SETS; if (fps && fps.length) { var m=Array.isArray(fps[0].main)?fps[0].main:(Array.isArray(fps[0].values)?fps[0].values:[]); var d=((window.SKAI_META&&window.SKAI_META.isDailyDigitGame)&&typeof window.SKAI_formatDailyComboDisplay==='function')?window.SKAI_formatDailyComboDisplay(m,((window.SKAI_META&&+window.SKAI_META.pick)||m.length)):m.join(','); return {rank:fps[0].rank,values:d,score:fps[0].score,display:d}; } return null; })(),
         // Additional inference params from SKAI_SETTINGS (for full parity)
         window_size:          drawsUsed, // total draws analyzed, same as skai_window
         ml_window_size:       (typeof S.windowSize === 'number') ? S.windowSize : null, // ML sliding window (small)
@@ -48244,7 +48745,8 @@ document.addEventListener('DOMContentLoaded', function () {
       // before the user clicks Save, so interceptSaveForm can serialize them correctly
       // even if skaiPrepareAiSave is blocked by an early guard during submit.
       try {
-        var _sdIsDaily = !!(window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame));
+        var _sdIsDaily = !!(window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame)
+          && !window.SKAI_META.isStandardLotteryGame);
         var _sdExtraLimit = _sdIsDaily ? 3 : ((window.SKAI_TOP_EXTRA && window.SKAI_TOP_EXTRA.length) ? Math.min(5, window.SKAI_TOP_EXTRA.length) : 5);
         var _sdMainArr = [];
         if (_sdIsDaily && window.SKAI_DAILY_CHOSEN_COMBOS && window.SKAI_DAILY_CHOSEN_COMBOS.length) {
@@ -48618,7 +49120,8 @@ document.addEventListener('DOMContentLoaded', function () {
         }
       } catch(_) {}
       var extraNums = [];
-      if (window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame)) {
+      if (window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame)
+          && !window.SKAI_META.isStandardLotteryGame) {
         extraNums = (window.skaiSaveExtraOrdered && window.skaiSaveExtraOrdered.length)
           ? window.skaiSaveExtraOrdered.slice(0, 3) : [];
       } else {
@@ -48992,6 +49495,11 @@ document.addEventListener('DOMContentLoaded', function () {
                             mainNumbers: res.mainNumbers || [], extraNumbers: res.extraNumbers || [],
                             finalPredictionSets: res.finalPredictionSets || [],
                             fpsJson: res.fpsJson || '', dailyChosenCombos: res.dailyChosenCombos || [],
+                            // FIX: store dailyExtraDigits and dailyTopExtras so saveAllSequential()
+                            // can restore the per-run bonus digits for daily lottery batch saves.
+                            // Without these, r.dailyExtraDigits is undefined during restore and
+                            // SKAI_DAILY_EXTRA_DIGITS is cleared to [] → bonus digits are lost.
+                            dailyExtraDigits: res.dailyExtraDigits || [], dailyTopExtras: res.dailyTopExtras || [],
                             blendAiPct: (typeof res.blendAiPct === 'number') ? res.blendAiPct : null,
                             blendSkipPct: null,
                             blendLabel: res.blendLabel || '',
@@ -49229,12 +49737,13 @@ document.addEventListener('DOMContentLoaded', function () {
     // Also restore SKAI_FINAL_PREDICTION_SETS / __SKAI_FPS_JSON__ so the save
     // payload contains this run's full ranked top-5 set list, not the last run's.
     try {
-      if (r.mainNumbers && r.mainNumbers.length) {
-        window.skaiSaveMainOrdered  = r.mainNumbers.slice();
-        window.skaiSaveExtraOrdered = (r.extraNumbers && r.extraNumbers.length)
-          ? r.extraNumbers.slice(0, (!!(window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame)) ? 3 : 5)) : [];
-      }
-      if (!(window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame))) {
+      // Always reset per-combo main/extra to prevent stale carry-over from previous combo
+      window.skaiSaveMainOrdered  = (r.mainNumbers && r.mainNumbers.length) ? r.mainNumbers.slice() : [];
+      window.skaiSaveExtraOrdered = (r.extraNumbers && r.extraNumbers.length)
+        ? r.extraNumbers.slice(0, (!!(window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame)
+            && !window.SKAI_META.isStandardLotteryGame) ? 3 : 5)) : [];
+      if (!(window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame)
+            && !window.SKAI_META.isStandardLotteryGame)) {
         var _restoreExtra = [];
         if (r.extraNumbers && r.extraNumbers.length) { _restoreExtra = normalizeNumericArray(r.extraNumbers).slice(0, 5); }
         if (r.finalPredictionSets && r.finalPredictionSets.length) {
@@ -49295,7 +49804,7 @@ document.addEventListener('DOMContentLoaded', function () {
             var _bFpsSets = _bFpsParsed.final_prediction_sets;
             var _bAiPN = [];
             for (var _bAk = 0; _bAk < _bFpsSets.length; _bAk++) {
-              var _bADisp = _bFpsSets[_bAk].display || (_bFpsSets[_bAk].values ? ((((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_bFpsSets[_bAk].values, ((window.SKAI_META && +window.SKAI_META.pick) || 0)) : (_bFpsSets[_bAk].values.join ? _bFpsSets[_bAk].values.join('') : String(_bFpsSets[_bAk].values)))) : '');
+              var _bADisp = _bFpsSets[_bAk].display || (_bFpsSets[_bAk].values ? ((((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_bFpsSets[_bAk].values, ((window.SKAI_META && +window.SKAI_META.pick) || 0)) : (_bFpsSets[_bAk].values.join ? _bFpsSets[_bAk].values.join(',') : String(_bFpsSets[_bAk].values)))) : '');
               _bAiPN.push({ rank: _bFpsSets[_bAk].rank, values: _bADisp, score: _bFpsSets[_bAk].score, display: _bADisp });
             }
             _bFpsParsed.aiPredictedNumbers      = _bAiPN;
@@ -49304,6 +49813,49 @@ document.addEventListener('DOMContentLoaded', function () {
             _bFpsStr = JSON.stringify(_bFpsParsed);
           }
         } catch(_bFpsUpErr) {}
+        // [[SKAI_DISPLAY_SYNC]] Inject daily_combo_strings from captured dailyChosenCombos
+        // so mylottoexpertExtractDailySavedView() can reliably read the top-5 combos.
+        if (r.dailyChosenCombos && r.dailyChosenCombos.length) {
+          try {
+            var _bFpsDcs = (typeof _bFpsStr === 'string' && _bFpsStr !== '') ? JSON.parse(_bFpsStr) : null;
+            if (_bFpsDcs && typeof _bFpsDcs === 'object') {
+              var _bDcStrings = [];
+              for (var _bDci = 0; _bDci < r.dailyChosenCombos.length && _bDci < 5; _bDci++) {
+                var _bDcRow = r.dailyChosenCombos[_bDci] || {};
+                var _bDcDisp = String(_bDcRow.display || _bDcRow.combo_display || '').replace(/[^0-9]/g, '');
+                if (!_bDcDisp && Array.isArray(_bDcRow.combo)) {
+                  _bDcDisp = _bDcRow.combo.join('');
+                }
+                if (_bDcDisp) { _bDcStrings.push(_bDcDisp); }
+              }
+              if (_bDcStrings.length) {
+                _bFpsDcs.daily_combo_strings = _bDcStrings;
+                _bFpsDcs.daily_primary_combo  = _bDcStrings[0];
+                _bFpsDcs.daily_primary_combo_display = _bDcStrings[0];
+                // [[SKAI_DISPLAY_SYNC]] Inject ranked digits from unique digits across all combo
+                // arrays so PHP daily_influential_digits_json is populated for batch daily saves.
+                if (!_bFpsDcs.daily_ranked_digits || !_bFpsDcs.daily_ranked_digits.length) {
+                  var _bRanked = [];
+                  var _bSeen = {};
+                  for (var _bRi = 0; _bRi < r.dailyChosenCombos.length && _bRi < 5; _bRi++) {
+                    var _bCombo = (r.dailyChosenCombos[_bRi] && Array.isArray(r.dailyChosenCombos[_bRi].combo)) ? r.dailyChosenCombos[_bRi].combo : [];
+                    for (var _bCj = 0; _bCj < _bCombo.length; _bCj++) {
+                      var _bD = parseInt(_bCombo[_bCj], 10);
+                      if (isFinite(_bD) && !_bSeen[_bD]) { _bSeen[_bD] = true; _bRanked.push(_bD); }
+                    }
+                  }
+                  if (_bRanked.length) { _bFpsDcs.daily_ranked_digits = _bRanked; }
+                }
+                // [[SKAI_DISPLAY_SYNC]] Inject bonus digits so daily_bonus_digits key exists in
+                // top_combos_json — PHP reads this before the daily_extra_digits fallback.
+                if (r.dailyExtraDigits && r.dailyExtraDigits.length) {
+                  _bFpsDcs.daily_bonus_digits = r.dailyExtraDigits.slice(0, 3);
+                }
+                _bFpsStr = JSON.stringify(_bFpsDcs);
+              }
+            }
+          } catch(_bDcsErr) {}
+        }
         window.__SKAI_FPS_JSON__ = _bFpsStr;
         // Write into all top_combos_json hidden fields so skaiPrepareAiSave picks them up
         var _bFpsFlds = document.querySelectorAll('input[name="top_combos_json"]');
@@ -49382,6 +49934,56 @@ document.addEventListener('DOMContentLoaded', function () {
 
     var ev = document.createEvent("Event");
     ev.initEvent("submit", true, true);
+    // FIX: Explicitly sync prediction-number form fields with this run's data before
+    // submitting.  The skai:done event listener (which normally populates numbers_json,
+    // extra_ball_numbers etc.) fires during each batch RUN, not during batch SAVE.  By
+    // the time saveAllSequential() saves run 0, the form fields contain the LAST run's
+    // data (stale), so every DB row ends up with the same numbers.  Setting the fields
+    // here — just before dispatchEvent — ensures each save carries its own payload.
+    try {
+      var _bfNumJson   = document.getElementById('skai-ai-numbers-json');
+      var _bfMainJson  = document.getElementById('skai-ai-main-json');
+      var _bfExtraJson = document.getElementById('skai-ai-extra-json');
+      var _bfMainCsv   = document.getElementById('skai-ai-main-csv');
+      var _bfExtraCsv  = document.getElementById('skai-ai-extra-csv');
+      var _bfIsDaily   = !!(window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame));
+      var _bfMainArr   = [];
+      var _bfExtraArr  = [];
+      if (_bfIsDaily) {
+        // Daily: main = combo display strings (top 5), extra = bonus digits (top 3)
+        if (r.dailyChosenCombos && r.dailyChosenCombos.length) {
+          for (var _bfdc = 0; _bfdc < r.dailyChosenCombos.length && _bfMainArr.length < 5; _bfdc++) {
+            var _bfDcRow = r.dailyChosenCombos[_bfdc] || {};
+            var _bfDcDisp = String(_bfDcRow.display || '').replace(/[^0-9]/g, '');
+            if (!_bfDcDisp && Array.isArray(_bfDcRow.combo)) { _bfDcDisp = _bfDcRow.combo.join(''); }
+            if (_bfDcDisp) { _bfMainArr.push(_bfDcDisp); }
+          }
+        }
+        if (!_bfMainArr.length && r.mainNumbers && r.mainNumbers.length) {
+          _bfMainArr = r.mainNumbers.slice();
+        }
+        _bfExtraArr = (r.dailyExtraDigits && r.dailyExtraDigits.length) ? r.dailyExtraDigits.slice(0, 3) : [];
+      } else {
+        // Regular lottery: main = top-N main numbers, extra = top-5 extra numbers
+        _bfMainArr  = (r.mainNumbers  && r.mainNumbers.length)  ? r.mainNumbers.slice()      : [];
+        _bfExtraArr = (r.extraNumbers && r.extraNumbers.length) ? r.extraNumbers.slice(0, 5) : [];
+      }
+      var _bfNumJsonStr = '';
+      try {
+        var _bfNjPayload = { main_numbers: _bfMainArr, extra_numbers: _bfExtraArr };
+        // FIX: For daily games also include daily_top_combo_strings so PHP skips intval()
+        // coercion of combo display strings (which destroys leading zeros like '056' → 56).
+        // PHP reads daily_top_combo_strings first (line ~8654) before falling back to
+        // main_numbers; including it here ensures the safe string path is always used.
+        if (_bfIsDaily && _bfMainArr.length) { _bfNjPayload.daily_top_combo_strings = _bfMainArr.slice(); }
+        _bfNumJsonStr = JSON.stringify(_bfNjPayload);
+      } catch(_) {}
+      if (_bfNumJson  && _bfNumJsonStr)       { _bfNumJson.value   = _bfNumJsonStr; }
+      if (_bfMainJson && _bfMainArr.length)   { _bfMainJson.value  = JSON.stringify(_bfMainArr); }
+      if (_bfExtraJson) { _bfExtraJson.value = _bfExtraArr.length ? JSON.stringify(_bfExtraArr) : ''; }
+      if (_bfMainCsv)  { _bfMainCsv.value   = _bfMainArr.join(','); }
+      if (_bfExtraCsv) { _bfExtraCsv.value  = _bfExtraArr.join(','); }
+    } catch (_bPredFldErr) {}
     form.dispatchEvent(ev);
 
     setTimeout(function () {
