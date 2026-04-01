@@ -8646,8 +8646,23 @@ $labelInput = implode(' - ', $parts);
             return $out;
         };
 
-        if ($isDailyGamePosted && !empty($dailyDisplaySet)) {
-            $mainArr = array_values($dailyDisplaySet);
+        // CHG: Only fall back to dailyDisplaySet when numbers_json did not supply valid
+        // individual daily digits. For Pick 3/4, numbers_json.main_numbers = [1,2,7] which
+        // is the correct digit-level array; dailyDisplaySet contains combo display strings
+        // like ["127","350"] that must NOT overwrite it (they would corrupt main_numbers).
+        // NOTE: line 8610 may have already overwritten $mainArr with $dailyDisplaySet
+        // (combo strings), so we check against that state.
+        $hasValidDailyDigits = $isDaily && !empty($mainArr)
+            && (max(array_map('intval', $mainArr)) <= 9);
+        if ($isDailyGamePosted && !empty($dailyDisplaySet) && !$hasValidDailyDigits) {
+            // Fallback: split the first combo string into individual digits
+            $firstComboStr    = preg_replace('/[^0-9]/', '', (string)($dailyDisplaySet[0] ?? ''));
+            $firstComboDigits = array_values(array_map('intval', str_split($firstComboStr)));
+            $mainArr = !empty($firstComboDigits) ? $firstComboDigits : array_values($dailyDisplaySet);
+            // CHG: Re-evaluate after extracting digits so all downstream guards ($hasValidDailyDigits)
+            // see the corrected digit-level array and do not overwrite it again.
+            $hasValidDailyDigits = $isDaily && !empty($mainArr)
+                && (max(array_map('intval', $mainArr)) <= 9);
         } else {
             $mainArr  = $norm($mainArr,  $isDaily, $isDailyGamePosted);
         }
@@ -8672,7 +8687,9 @@ $labelInput = implode(' - ', $parts);
         if ($extraMin <= 0) $extraMin = $isDaily ? 0 : 1;
 
         // Range filter (drop anything out of range)
-        if ($isDailyGamePosted && !empty($dailyDisplaySet)) {
+        // CHG: Reuse $hasValidDailyDigits computed above so valid individual digits are
+        // never replaced by combo display strings during the range-filter step.
+        if ($isDailyGamePosted && !empty($dailyDisplaySet) && !$hasValidDailyDigits) {
             $mainArr = array_values($dailyDisplaySet);
         } else {
             $mainArr = array_values(array_filter($mainArr, function($n) use ($mainMin, $mainMax){
@@ -8746,7 +8763,8 @@ $labelInput = implode(' - ', $parts);
         };
 
         $preserveProbabilityOrder = !empty($isSkaiPool); // already derived from analysis_type earlier
-        if ($isDailyGamePosted && !empty($dailyDisplaySet)) {
+        // CHG: Same guard as above – only use combo display strings when valid digits absent.
+        if ($isDailyGamePosted && !empty($dailyDisplaySet) && !$hasValidDailyDigits) {
             $mainArr = array_values($dailyDisplaySet);
         } else {
             $mainArr  = $canon($mainArr,  $preserveProbabilityOrder, $isDailyGamePosted);
@@ -8754,11 +8772,28 @@ $labelInput = implode(' - ', $parts);
         $extraArr = $canon($extraArr, $preserveProbabilityOrder, $isDailyGamePosted);
 
         // Rebuild CSVs from canonical arrays
-        $mainCsv  = $isDailyGamePosted && !empty($dailyDisplaySet) ? implode(',', $dailyDisplaySet) : implode(',', $mainArr);
-        $extraCsv = implode(',', $extraArr);
-        if ($isDailyGamePosted && $dailyDisplayMain !== '') {
-            $mainCsv = $dailyDisplayMain;
+        // CHG: For daily digit games, emit comma-separated individual digits ("1,2,7")
+        // instead of a concatenated combo string ("127") or a list of combo strings
+        // ("127,350,892"). MyLottoExpert chips render each token as one ball, so the
+        // canonical representation must be digit-level, not combo-level.
+        if ($isDailyGamePosted) {
+            // Re-check whether $mainArr now holds valid individual digits (0-9)
+            $hasValidDailyDigitsNow = $isDaily && !empty($mainArr)
+                && (max(array_map('intval', $mainArr)) <= 9);
+            if ($hasValidDailyDigitsNow) {
+                $mainCsv = implode(',', array_map('intval', $mainArr));
+            } elseif (!empty($dailyDisplaySet)) {
+                // Fallback: try to split the first combo string into digits
+                $fbStr    = preg_replace('/[^0-9]/', '', (string)($dailyDisplaySet[0] ?? ''));
+                $fbDigits = array_values(array_map('intval', str_split($fbStr)));
+                $mainCsv  = !empty($fbDigits) ? implode(',', $fbDigits) : implode(',', $dailyDisplaySet);
+            } else {
+                $mainCsv = $dailyDisplayMain !== '' ? $dailyDisplayMain : implode(',', $mainArr);
+            }
+        } else {
+            $mainCsv = implode(',', $mainArr);
         }
+        $extraCsv = implode(',', $extraArr);
 
         // Resolve lottery_id robustly (POST ? config ? URL ? JSON by game_id/dbCol) BEFORE validating
         $lotteryId = skaiResolveLotteryId($lotteryConfig, $in, $masterJsonPath);
@@ -9147,6 +9182,12 @@ $labelInput = implode(' - ', $parts);
         // Build insert object (ONLY known columns) - deduped keys, sanitized values
  // CHG: Force canonical source for SKAI saves (prevents Heatmap branch on dashboard)
 $source = 'skai_prediction';
+// CHG: All saves from this SKAI page are pool-style predictions.
+// Setting $isSkaiPool=true ensures extra-ball count validation never blocks a save
+// for games like EuroMillions or Powerball where the SKAI display intentionally shows
+// more candidate extra balls than the official draw count.
+$isSkaiPool = true;
+$sourceNorm  = 'skai_prediction';
 
 // CHG: Build a comprehensive SKAI settings blob so dashboard can render -Run parameters-
 $skaiSettings = [
@@ -22253,7 +22294,8 @@ function buildPayload(){
         var _fpsSets = [];
         for (var _fi2 = 0; _fi2 < _fps.length; _fi2++) {
           var _bpMain = Array.isArray(_fps[_fi2].main) ? _fps[_fi2].main : (Array.isArray(_fps[_fi2].values) ? _fps[_fi2].values : []);
-          _fpsSets.push({ rank: _fps[_fi2].rank, values: _bpMain.slice(), score: _fps[_fi2].score, display: (((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_bpMain, _pick) : _bpMain.join('')) });
+          // CHG: Carry per-row extras so each prediction set retains its own bonus numbers.
+          _fpsSets.push({ rank: _fps[_fi2].rank, values: _bpMain.slice(), extra: Array.isArray(_fps[_fi2].extra) ? _fps[_fi2].extra.slice() : [], score: _fps[_fi2].score, display: (((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_bpMain, _pick) : _bpMain.join('')) });
         }
         // CHG: Build aiPredictedNumbers (display-string form) – the canonical save key.
         var _bpAiPN = [];
@@ -22804,7 +22846,8 @@ function buildPayload(){
             var _wsets = [];
             for (var _wi = 0; _wi < _wfps.length; _wi++) {
               var _wMain = Array.isArray(_wfps[_wi].main) ? _wfps[_wi].main : (Array.isArray(_wfps[_wi].values) ? _wfps[_wi].values : []);
-              _wsets.push({ rank: _wfps[_wi].rank, values: _wMain.slice(), score: _wfps[_wi].score, display: (((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_wMain, ((window.SKAI_META && +window.SKAI_META.pick) || _wMain.length)) : _wMain.join('')) });
+              // CHG: Carry per-row extras so each prediction set retains its own bonus numbers.
+              _wsets.push({ rank: _wfps[_wi].rank, values: _wMain.slice(), extra: Array.isArray(_wfps[_wi].extra) ? _wfps[_wi].extra.slice() : [], score: _wfps[_wi].score, display: (((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_wMain, ((window.SKAI_META && +window.SKAI_META.pick) || _wMain.length)) : _wMain.join('')) });
             }
             evd.final_prediction_sets      = _wsets;
             evd.final_prediction_set_count = _wsets.length;
@@ -31953,7 +31996,8 @@ function fmt(v){
           var _fpsSets2 = [];
           for (var _fi3 = 0; _fi3 < _fps2.length; _fi3++) {
             var _fps2Main = Array.isArray(_fps2[_fi3].main) ? _fps2[_fi3].main : (Array.isArray(_fps2[_fi3].values) ? _fps2[_fi3].values : []);
-            _fpsSets2.push({ rank: _fps2[_fi3].rank, values: _fps2Main.slice(), score: _fps2[_fi3].score, display: (((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_fps2Main, ((window.SKAI_META && +window.SKAI_META.pick) || _fps2Main.length)) : _fps2Main.join('')) });
+            // CHG: Carry per-row extras so each set in the save payload has its own bonus numbers.
+            _fpsSets2.push({ rank: _fps2[_fi3].rank, values: _fps2Main.slice(), extra: Array.isArray(_fps2[_fi3].extra) ? _fps2[_fi3].extra.slice() : [], score: _fps2[_fi3].score, display: (((window.SKAI_META && window.SKAI_META.isDailyDigitGame) && typeof window.SKAI_formatDailyComboDisplay === 'function') ? window.SKAI_formatDailyComboDisplay(_fps2Main, ((window.SKAI_META && +window.SKAI_META.pick) || _fps2Main.length)) : _fps2Main.join('')) });
           }
           // CHG: Build aiPredictedNumbers (display-string form) alongside final_prediction_sets (array form).
           var _aiPN3 = [];
@@ -38422,7 +38466,9 @@ try {
             for (var _fk = 0; _fk < _fps.length; _fk++) {
               // CHG: main||values fallback so batch-restored entries (which use .values) work too
               var _fkMain = Array.isArray(_fps[_fk].main) ? _fps[_fk].main : (Array.isArray(_fps[_fk].values) ? _fps[_fk].values : []);
-              _fpsSets.push({ rank: _fps[_fk].rank, values: _fkMain.slice(), score: _fps[_fk].score, display: window.SKAI_formatDailyComboDisplay(_fkMain, _pickDigit || _fkMain.length) });
+              // CHG: Preserve per-row extras so each saved prediction row carries its own
+              // extra/bonus numbers rather than inheriting row-0 globals.
+              _fpsSets.push({ rank: _fps[_fk].rank, values: _fkMain.slice(), extra: Array.isArray(_fps[_fk].extra) ? _fps[_fk].extra.slice() : [], score: _fps[_fk].score, display: window.SKAI_formatDailyComboDisplay(_fkMain, _pickDigit || _fkMain.length) });
             }
             // CHG: Build aiPredictedNumbers (canonical display-string form of the ranked sets).
             // This is the primary save key the dashboard and save pipeline read.
@@ -40012,9 +40058,18 @@ try {
 
           aiX.innerHTML = '';
 
-          if (!(window.SKAI_META && window.SKAI_META.hasExtraBall)) {
+          // CHG: Daily games own their bonus display via skaiRenderDailyBonusDigits inside
+          // the Daily Decision Panel. Never render in the generic aiExtraPredictionContainer
+          // for daily games – that would create a second (stray) set of red chips.
+          // Also preserve skaiSaveExtraOrdered for daily games: it holds the bonus digits
+          // captured from the main ML head and must survive to the save form population.
+          if ((window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame)) ||
+              !(window.SKAI_META && window.SKAI_META.hasExtraBall)) {
             try { window.SKAI_TOP_EXTRA = []; } catch(_){}
-            try { window.skaiSaveExtraOrdered = []; } catch(_){}
+            // Only clear skaiSaveExtraOrdered for non-daily games; daily games need it for save.
+            if (!(window.SKAI_META && (window.SKAI_META.isDaily || window.SKAI_META.isDailyDigitGame))) {
+              try { window.skaiSaveExtraOrdered = []; } catch(_){}
+            }
             aiX.removeAttribute('data-ai-ready');
             aiX.style.display = 'none';
             return;
